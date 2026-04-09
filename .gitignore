@@ -1,0 +1,22 @@
+# Style guides and unrelated docs
+R_guide_modern_dplyr_claude.md
+gglot2_style_guide.md
+
+# Example project source code (keep only _dependency_analysis outputs)
+conflict/prepare/
+conflict/empirical/
+conflict/conf_biodiversity_setup.R
+conflict/.Rhistory
+conflict/read*
+
+migration/code/
+
+thesis/
+
+# Temp/scratch files
+r_dep_analyzer/check_issues.R
+
+# R session files
+.Rhistory
+.RData
+*.Rhistory

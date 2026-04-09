@@ -1,14 +1,84 @@
 # Path detection (from master file and setup files; this file is generated, do not edit)
-# Project: C:\Users\iddo2\cursor_test\migration
+# Project: C:\Users\iddo2\dependency_analyzer\migration
 
 master_file:
-(none detected)
+code/Build/3_Maps/0-create_new_masters_map.R
+
+setup_or_master_files_scanned:
+  - code/Build/3_Maps/0-create_new_masters_map.R
+  - code/master_wip.R
+  - code/SSA_env_SetUp.R
 
 path_roots_from_master:
-  (none)
+  - build.code.dir
+  - final.code.dir
 
 path_roots_from_setup:
-  (none)
+  - data/Raw
+  - data/Build
+  - data/Final
+  - modeling/program/results/output/tab_final
+  - code/Build
+  - code/Final
+  - c
+  - prev
+  - _
+  - country
+  - ipums_code
+  - country.name
+  - iso3c
+  - .do
+  - C:/Users/iddo2/dependency_analyzer/migration
+  - ${stem}
+  - ${stem}/data/Raw/Countries/AGO
+  - ${amazon} ${congo} ${australiasia} ${sundaland} ${indoburma} ${mesoamerica} ${westafrica}
+  - ../../RAW/WORLD/FRA
+  - ../../RAW/WORLD/GEE
+  - ../../RAW/WORLD/MAPS
+  - ../../RAW/WORLD/WDI
+  - ../WORLD
+  - ../MIGRATION AFRICA/DATA/RAW/AFRICA/FAO
+  - ../MIGRATION AFRICA/DATA/BUILD/AFRICA/FAO
+  - ../MIGRATION AFRICA/DATA/RAW/AFRICA/FGGD
+  - ../MIGRATION AFRICA/DATA/BUILD/AFRICA/FGGD
+  - m_od_L  DXp_L DurXp_L m_odXlm_L m_odXdm_L DXpXlm_L DXpXdm_L m_oXlm_L DXlm_L m_oXdm_L DXdm_L
+  - m_od_L dXp_L
+  - $shifts gr_gdp_`l
 
 setup_path_vars:
-  (none)
+  raw.dir: data/Raw/
+  build.dir: data/Build/
+  out.dir: data/Final/
+  model.dir: modeling/program/results/output/tab_final
+  build.code.dir: code/Build
+  final.code.dir: code/Final
+  r: c
+  l_stub: prev
+  sep: _
+  name: country
+  value: ipums_code
+  origin: country.name
+  destination: iso3c
+  winslash: /
+  fileext: .do
+  rawdata: data/Raw
+  build: data/Build
+  final: data/Final
+  model: modeling/program/results/output/tab_final
+  projdir: C:/Users/iddo2/dependency_analyzer/migration
+  dir: ${stem}
+  rawdtadir: ${stem}/data/Raw/Countries/AGO
+  rainforest: ${amazon} ${congo} ${australiasia} ${sundaland} ${indoburma} ${mesoamerica} ${westafrica}
+  fao: ../../RAW/WORLD/FRA
+  gee: ../../RAW/WORLD/GEE
+  maps: ../../RAW/WORLD/MAPS
+  wdi: ../../RAW/WORLD/WDI
+  work: ../WORLD
+  projdir: C:/Users/iddo2/dependency_analyzer/migration
+  rfao: ../MIGRATION AFRICA/DATA/RAW/AFRICA/FAO
+  bfao: ../MIGRATION AFRICA/DATA/BUILD/AFRICA/FAO
+  rfggd: ../MIGRATION AFRICA/DATA/RAW/AFRICA/FGGD
+  bfggd: ../MIGRATION AFRICA/DATA/BUILD/AFRICA/FGGD
+  shares: m_od_L  DXp_L DurXp_L m_odXlm_L m_odXdm_L DXpXlm_L DXpXdm_L m_oXlm_L DXlm_L m_oXdm_L DXdm_L
+  ishares: m_od_L dXp_L
+  shifts: $shifts gr_gdp_`l

@@ -53,32 +53,15 @@ parse_r_project <- function(project_path, exclude_folders = character(0)) {
     }
   }
 
-  #region agent log
-  try({
-    parsed_is_null <- is.null(parsed)
-    parsed_class <- paste(class(parsed), collapse = "/")
-    log_con <- file("c:/Users/iddo2/cursor_test/debug-c0a103.log", open = "a")
-    log_line <- paste0(
-      '{"sessionId":"c0a103","runId":"pre-fix","hypothesisId":"H1",',
-      '"location":"parse_r_files.R:parse_r_project","message":"parsed structure before setup_vars",',
-      '"data":{"parsed_is_null":', if (parsed_is_null) "true" else "false",
-      ',"parsed_class":"', parsed_class, '"},',
-      '"timestamp":', as.integer(as.numeric(Sys.time()) * 1000), '}'
-    )
-    writeLines(log_line, log_con)
-    close(log_con)
-  }, silent = TRUE)
-  #endregion
-
   setup_vars <- parse_setup_vars(parsed)
   inferred_stata <- infer_stata_globals_from_r(parsed, setup_vars, project_path)
   setup_vars <- c(setup_vars, inferred_stata)
   stata_globals <- parse_stata_globals(parsed)
   setup_vars <- c(setup_vars, stata_globals)
-  parsed <- resolve_paths_with_setup(parsed, setup_vars)
-  
+  parsed <- resolve_paths_with_setup(parsed, setup_vars, project_path)
+
   # Discover master file (read-only) and path roots from master + setup for path matching
-  master_info <- discover_master_and_path_roots(project_path, names(parsed$files), setup_vars)
+  master_info <- discover_master_and_path_roots(project_path, names(parsed), setup_vars)
   
   list(
     files = parsed,
@@ -182,12 +165,12 @@ infer_stata_globals_from_r <- function(parsed, setup_vars, project_path = NULL) 
   out <- character(0)
   proj_norm <- if (length(project_path) > 0 && nzchar(project_path))
     stata_global_value_to_canonical(gsub("\\\\", "/", trimws(project_path))) else character(0)
-  r_files <- names(parsed$files)[vapply(parsed$files, function(f) is.null(f$file_type) || f$file_type != "stata", logical(1))]
+  r_files <- names(parsed)[vapply(parsed, function(f) is.null(f$file_type) || f$file_type != "stata", logical(1))]
   # Pattern: paste0('global NAME  "', normalizePath(R_VAR, winslash = "/"), '"') - flexible spacing
   pat_var <- "paste0\\s*\\(\\s*['\"]global\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*[\"']\\s*['\"]\\s*,\\s*normalizePath\\s*\\(\\s*([a-zA-Z_][a-zA-Z0-9_.]*)\\s*(?:,\\s*winslash\\s*=\\s*[\"']/[\"']\\s*)?\\)"
   pat_getwd <- "paste0\\s*\\(\\s*['\"]global\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s*[\"']\\s*['\"]\\s*,\\s*normalizePath\\s*\\(\\s*getwd\\s*\\(\\s*\\)\\s*(?:,\\s*winslash\\s*=\\s*[\"']/[\"']\\s*)?\\)"
   for (rel in r_files) {
-    txt <- tryCatch(readLines(parsed$files[[rel]]$path, warn = FALSE), error = function(e) character(0))
+    txt <- tryCatch(readLines(parsed[[rel]]$path, warn = FALSE), error = function(e) character(0))
     if (length(txt) == 0) next
     full_txt <- paste(txt, collapse = "\n")
     m <- regmatches(full_txt, gregexpr(pat_var, full_txt))[[1]]
@@ -213,9 +196,9 @@ infer_stata_globals_from_r <- function(parsed, setup_vars, project_path = NULL) 
 # Stata globals set by R at runtime are inferred via infer_stata_globals_from_r; this adds any defined inside .do files.
 parse_stata_globals <- function(parsed) {
   globals <- character(0)
-  do_files <- names(parsed$files)[vapply(parsed$files, function(f) identical(f$file_type, "stata"), logical(1))]
+  do_files <- names(parsed)[vapply(parsed, function(f) identical(f$file_type, "stata"), logical(1))]
   for (rel in do_files) {
-    txt <- tryCatch(readLines(parsed$files[[rel]]$path, warn = FALSE), error = function(e) character(0))
+    txt <- tryCatch(readLines(parsed[[rel]]$path, warn = FALSE), error = function(e) character(0))
     if (length(txt) == 0) next
     full_txt <- paste(txt, collapse = "\n")
     pat <- 'global\\s+([a-zA-Z_][a-zA-Z0-9_]*)\\s+(?:=\\s*)?["\']([^"\']*)["\']'
@@ -241,27 +224,9 @@ is_setup_or_master_file <- function(rel_path) {
 
 # Scan setup/master-named files (R and Stata) for path variables. Works with only setup, only master, or both.
 parse_setup_vars <- function(parsed) {
-  all_rel <- names(parsed$files)
-
-  #region agent log
-  try({
-    all_rel_is_null <- is.null(all_rel)
-    all_rel_type <- typeof(all_rel)
-    all_rel_len <- if (is.null(all_rel)) 0L else length(all_rel)
-    log_con <- file("c:/Users/iddo2/cursor_test/debug-c0a103.log", open = "a")
-    log_line <- paste0(
-      '{"sessionId":"c0a103","runId":"pre-fix","hypothesisId":"H1",',
-      '"location":"parse_r_files.R:parse_setup_vars","message":"all_rel before basename",',
-      '"data":{"all_rel_is_null":', if (all_rel_is_null) "true" else "false",
-      ',"all_rel_type":"', all_rel_type, '","all_rel_len":', all_rel_len, '},',
-      '"timestamp":', as.integer(as.numeric(Sys.time()) * 1000), '}'
-    )
-    writeLines(log_line, log_con)
-    close(log_con)
-  }, silent = TRUE)
-  #endregion
+  all_rel <- names(parsed)
   # Include (1) files with no sources and setup-like name, (2) any file whose name suggests setup or master
-  no_sources <- vapply(parsed$files, function(f) {
+  no_sources <- vapply(parsed, function(f) {
     (is.null(f$file_type) || f$file_type != "stata") && length(f$sources) == 0
   }, logical(1))
   by_name <- vapply(all_rel, is_setup_or_master_file, logical(1))
@@ -270,12 +235,12 @@ parse_setup_vars <- function(parsed) {
     all_rel[by_name]
   ))
   if (length(setup_candidates) == 0) {
-    setup_candidates <- names(parsed$files)[no_sources]
+    setup_candidates <- names(parsed)[no_sources]
     if (is.null(setup_candidates)) setup_candidates <- character(0)
   }
   vars <- character(0)
   for (rel in setup_candidates) {
-    f <- parsed$files[[rel]]
+    f <- parsed[[rel]]
     if (is.null(f)) next
     # R/Rmd: path assignments (raw.dir <- "data/Raw", build.dir = "data/Build")
     if (is.null(f$file_type) || f$file_type != "stata") {
@@ -309,10 +274,9 @@ parse_setup_vars <- function(parsed) {
   vars
 }
 
-resolve_paths_with_setup <- function(parsed, setup_vars) {
-  project_path <- parsed$project_path
-  for (rel in names(parsed$files)) {
-    f <- parsed$files[[rel]]
+resolve_paths_with_setup <- function(parsed, setup_vars, project_path = NULL) {
+  for (rel in names(parsed)) {
+    f <- parsed[[rel]]
     if (!is.null(f$file_type) && f$file_type == "stata") {
       f$data_reads <- resolve_stata_paths(f$data_reads, setup_vars, project_path)
       f$data_writes <- resolve_stata_paths(f$data_writes, setup_vars, project_path)

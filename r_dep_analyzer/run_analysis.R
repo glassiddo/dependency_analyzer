@@ -15,7 +15,7 @@
 # Change this to your project's data root so the scanner can find referenced
 # datasets. Leave "" to use only the project's own data folder (e.g. project/data).
 # -----------------------------------------------------------------------------
-default_data_path <- "C:\\Users\\iddo2\\Dropbox\\Migration Africa\\data"
+default_data_path <- ""
 
 args <- commandArgs(trailingOnly = TRUE)
 interactive_mode <- length(args) < 1
