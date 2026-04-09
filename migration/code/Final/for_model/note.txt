@@ -1,0 +1,1 @@
+perhaps should have here a stata file that merges datasets for the model - and split 0_build_datasets.do into separate files (one merges data, another runs the model; perhaps another that sets parametrs? although can imagine that separating this from the model itself could be annoying)

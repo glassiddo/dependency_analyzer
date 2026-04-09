@@ -1,0 +1,97 @@
+///////////////////////////////////////////////////////////////////////////////
+// THIS SCRIPT COMPUTES AND EXPORTS ESTIMATES OF AREA AND TREE COVER IN 2000 //
+//      FOR EACH ADMIN UNIT ACROSS THE COUNTRIES INCLUDED IN THE STUDY       //
+///////////////////////////////////////////////////////////////////////////////
+
+// OUTLINE OF THE STUDY AREA
+
+var BLANKCANVAS = ee.Image(0).mask(0);
+
+var FAOGAUL  = ee.FeatureCollection("FAO/GAUL/2015/level0");
+var AFRLIST  = ee.List(['Benin', 'Botswana', 'Burkina Faso', 'Cameroon', 'Ghana', 'Guinea', 'Kenya', 'Lesotho', 'Malawi', 'Mali', 'Mauritius', 'Mozambique', 'Rwanda', 'Senegal', 'Sierra Leone', 'South Africa', 'Sudan', 'Tanzania', 'Togo', 'Uganda', 'Zambia', 'Zimbabwe']);
+var MAPFOCUS = FAOGAUL.filter(ee.Filter.inList('ADM0_NAME', AFRLIST));
+var OUTLINE  = BLANKCANVAS.paint(MAPFOCUS, 'red', 0.5); 
+var AFRADM0  = MAPFOCUS.geometry();
+
+Map.setOptions('TERRAIN');
+Map.centerObject(MAPFOCUS, 3.5);
+
+var IPUMSADMUNIT = ee.FeatureCollection("users/houngbedjiken/AFRMIGDEFO/ADMUNITROI");
+var IPUMSADMUNITOUTLINE = BLANKCANVAS.paint(IPUMSADMUNIT, 'blue', 1); 
+Map.addLayer(IPUMSADMUNITOUTLINE, {'palette': 'blue','opacity': 0.8}, 'admin units - IPUMS');
+
+// A FUNCTION THAT HELPS APPEND IMAGES AS BAND
+
+function appendBand(current, previous) {
+  return current.addBands(ee.Image(previous));
+}
+
+// A FUNCTION TO DELETE GEOMETRY FROM FEATURE
+
+function deletegeom(feature) {
+  return ee.Feature(feature.select([".*"], null, false));
+}
+
+// THIS FUNCTION IDENTIFIES THE FEATURE'S GEOMETRY AND ADDS IT AS A PROPERTY.
+
+var addgtype = function(feature) {
+  return feature.set({geotype: feature.geometry().type()});
+};
+
+var IPUMSADMUNIT = IPUMSADMUNIT.map(addgtype);
+
+// THIS FUNCTION COMPUTES THE FEATURE'S GEOMETRY AREA AND ADDS IT AS A PROPERTY.
+
+var addarea = function(feature) {
+  return feature.set({areaha: feature.geometry().area().divide(10000)});
+};
+
+var IPUMSADMUNIT  = IPUMSADMUNIT.map(addarea);
+
+//////////////////////////////////////
+// TREE COVER BY ADMIN UNIT IN 2000 //
+//////////////////////////////////////
+
+var GFCCOVER       = ee.Image('UMD/hansen/global_forest_change_2020_v1_8').select(['treecover2000']);
+var FCFILTER       = GFCCOVER.gt(ee.Number(30).toInt()); // YOU CAN SET THE THRESHOLD HERE
+var GFCCOVERAREA   = GFCCOVER.multiply(ee.Image.pixelArea()).multiply(1/100).multiply(1/10000).updateMask(FCFILTER);
+
+// REDUCING IMAGES TO ZONAL STATISTICS AT THE POLYGON LEVEL
+
+var IPUMSADMUNITTC = GFCCOVERAREA.reduceRegions({
+  reducer: ee.Reducer.sum(),
+  collection: IPUMSADMUNIT,
+  scale: 30  // the resolution of GFC is 30m
+  
+});
+
+// RENAMING THE MAIN VARIABLES
+
+var OUTPUT = IPUMSADMUNITTC.map(function(feat){
+  return ee.Feature(null, { 
+    GEO_ID: feat.get('GEO_ID'),
+    CNTRY_NAME: feat.get('CNTRY_NAME'),
+    ADMIN_NAME: feat.get('ADMIN_NAME'),
+    geotype  : feat.get('geotype'),
+    areaha  : feat.get('areaha'),
+    tcha2000 : feat.get('sum')
+    
+  });
+  
+});
+
+
+// EXPORTING ATTRIBUTE TABLE TO DRIVE
+
+var titlecsv = ee.String('IPUMSADMUNITTC');
+titlecsv = titlecsv.getInfo();
+
+Export.table.toDrive({
+  collection: OUTPUT,
+  description: titlecsv,
+  folder: 'AFRMIGDEFO', // YOU MAY NEED TO CREATE AN IFL FOLDER IN YOUR GOOGLE DRIVE ACCOUNT
+  fileNamePrefix: titlecsv, 
+  fileFormat: 'CSV',
+  selectors: ['GEO_ID', 'CNTRY_NAME', 'ADMIN_NAME', 'geotype', 'areaha', 'tcha2000']
+  
+});

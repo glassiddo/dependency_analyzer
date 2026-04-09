@@ -1,0 +1,14 @@
+# Path detection (from master file and setup files; this file is generated, do not edit)
+# Project: C:\Users\iddo2\cursor_test\migration
+
+master_file:
+(none detected)
+
+path_roots_from_master:
+  (none)
+
+path_roots_from_setup:
+  (none)
+
+setup_path_vars:
+  (none)

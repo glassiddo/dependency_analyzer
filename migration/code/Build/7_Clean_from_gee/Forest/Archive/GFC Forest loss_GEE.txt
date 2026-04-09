@@ -1,0 +1,116 @@
+///////////////////////////////////////////////////////////////////////////////
+// THIS SCRIPT COMPUTES AND EXPORTS ESTIMATES OF AREA AND TREE COVER IN 2000 //
+//      FOR EACH ADMIN UNIT ACROSS THE COUNTRIES INCLUDED IN THE STUDY       //
+///////////////////////////////////////////////////////////////////////////////
+
+// OUTLINE OF THE STUDY AREA
+
+var BLANKCANVAS = ee.Image(0).mask(0);
+
+var FAOGAUL  = ee.FeatureCollection("FAO/GAUL/2015/level0");
+var AFRLIST  = ee.List(['Benin', 'Botswana', 'Burkina Faso', 'Cameroon', 'Ghana', 'Guinea', 'Kenya', 'Lesotho', 'Malawi', 'Mali', 'Mauritius', 'Mozambique', 'Rwanda', 'Senegal', 'Sierra Leone', 'South Africa', 'Sudan', 'Tanzania', 'Togo', 'Uganda', 'Zambia', 'Zimbabwe']);
+var MAPFOCUS = FAOGAUL.filter(ee.Filter.inList('ADM0_NAME', AFRLIST));
+var OUTLINE  = BLANKCANVAS.paint(MAPFOCUS, 'red', 0.5); 
+var AFRADM0  = MAPFOCUS.geometry();
+
+Map.setOptions('TERRAIN');
+Map.centerObject(MAPFOCUS, 3.5);
+
+var IPUMSADMUNIT = ee.FeatureCollection("users/houngbedjiken/AFRMIGDEFO/ADMUNITROI");
+var IPUMSADMUNITOUTLINE = BLANKCANVAS.paint(IPUMSADMUNIT, 'blue', 1); 
+Map.addLayer(IPUMSADMUNITOUTLINE, {'palette': 'blue','opacity': 0.8}, 'admin units - IPUMS');
+
+// A FUNCTION THAT HELPS APPEND IMAGES AS BAND
+
+function appendBand(current, previous) {
+  return current.addBands(ee.Image(previous));
+}
+
+// A FUNCTION TO DELETE GEOMETRY FROM FEATURE
+
+function deletegeom(feature) {
+  return ee.Feature(feature.select([".*"], null, false));
+}
+
+/////////////////////////////////////////////////////////////
+// TREE COVER LOSS BY YEAR AND ADMIN UNITS BETWEEN 2001-20 //
+/////////////////////////////////////////////////////////////
+
+var GFCCOVER       = ee.Image('UMD/hansen/global_forest_change_2020_v1_8').select(['treecover2000']).clip(AFRADM0).rename(['tc2000']).set('Name', ee.String('gfc'));
+var GFCLOSS        = ee.Image("UMD/hansen/global_forest_change_2020_v1_8").select(['loss']).clip(AFRADM0);
+var GFCLOSSYR      = ee.Image("UMD/hansen/global_forest_change_2020_v1_8").select(['lossyear']).clip(AFRADM0);
+
+var FCFILTER       = GFCCOVER.gt(ee.Number(30).toInt()); // YOU CAN SET THE THRESHHOLD HERE :)
+var TCLOSSFILTER   = GFCLOSS.eq(ee.Number(1).toInt());
+
+var YEARS = ee.List.sequence(1, 20);
+
+var YEARLYTCLOSS = ee.ImageCollection.fromImages(YEARS.map(function (y) {
+  var year     = ee.Number(2000).add(ee.Number(y).toInt());
+  var yearstr  = year.format();
+  var namevar  = ee.String('tcloss').cat(yearstr);
+  var filter   = GFCLOSSYR.eq(ee.Number(y).toInt());
+  var filtered = GFCCOVER.multiply(ee.Image.pixelArea()).multiply(1/100).multiply(1/10000).updateMask(FCFILTER).updateMask(filter).reduce(ee.Reducer.sum()).set('Name', namevar);
+  return filtered.select([0],[namevar]);
+}).flatten());
+
+// TRANSFORMING IMAGE COLLECTION TO AN IMAGE WITH SEVERAL BANDS 
+
+var TCLOSSDATA = ee.Image(YEARLYTCLOSS.iterate(appendBand, ee.Image().select()));
+
+// REDUCING IMAGES TO ZONAL STATISTICS AT THE 1ST ADMIN UNIT LEVEL
+
+var IPUMSADMUNITTCLOSS = TCLOSSDATA.reduceRegions({
+  reducer: ee.Reducer.sum(),
+  collection: IPUMSADMUNIT,
+  scale: 30  // the resolution of GFC is 30m
+  
+}).map(deletegeom);
+
+// RENAMING THE MAIN VARIABLES
+
+var OUTPUT = IPUMSADMUNITTCLOSS.map(function(feat){
+  return ee.Feature(null, { 
+        GEO_ID: feat.get('GEO_ID'),
+    CNTRY_NAME: feat.get('CNTRY_NAME'),
+    ADMIN_NAME: feat.get('ADMIN_NAME'),
+    tclossha2001: feat.get('tcloss2001'),
+    tclossha2002: feat.get('tcloss2002'),
+    tclossha2003: feat.get('tcloss2003'),
+    tclossha2004: feat.get('tcloss2004'),
+    tclossha2005: feat.get('tcloss2005'),
+    tclossha2006: feat.get('tcloss2006'),
+    tclossha2007: feat.get('tcloss2007'),
+    tclossha2008: feat.get('tcloss2008'),
+    tclossha2009: feat.get('tcloss2009'),
+    tclossha2010: feat.get('tcloss2010'),
+    tclossha2011: feat.get('tcloss2011'),
+    tclossha2012: feat.get('tcloss2012'),
+    tclossha2013: feat.get('tcloss2013'),
+    tclossha2014: feat.get('tcloss2014'),
+    tclossha2015: feat.get('tcloss2015'),
+    tclossha2016: feat.get('tcloss2016'),
+    tclossha2017: feat.get('tcloss2017'),
+    tclossha2018: feat.get('tcloss2018'),
+    tclossha2019: feat.get('tcloss2019'),
+    tclossha2020: feat.get('tcloss2020')
+  });
+  
+});
+
+
+// EXPORTING ATTRIBUTE TABLE TO DRIVE
+
+var titlefao = ee.String('IPUMSADMUNITTCLOSS');
+titlefao = titlefao.getInfo();
+
+Export.table.toDrive({
+  collection: OUTPUT,
+  description: titlefao,
+  folder: 'AFRMIGDEFO',
+  fileNamePrefix: titlefao, 
+  fileFormat: 'CSV',
+  selectors: ['GEO_ID', 'CNTRY_NAME', 'ADMIN_NAME', 'tclossha2001', 'tclossha2002', 'tclossha2003', 'tclossha2004', 'tclossha2005', 'tclossha2006', 'tclossha2007', 'tclossha2008', 'tclossha2009', 'tclossha2010', 'tclossha2011', 'tclossha2012', 'tclossha2013', 'tclossha2014', 'tclossha2015', 'tclossha2016', 'tclossha2017', 'tclossha2018', 'tclossha2019', 'tclossha2020'
+]
+  
+});

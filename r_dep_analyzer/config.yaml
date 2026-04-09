@@ -1,0 +1,20 @@
+# R Dependency Analyzer - Configuration
+# Run: Rscript run_analysis.R /path/to/your/research/project
+
+# File patterns to scan
+scan:
+  r_extensions: [".R", ".r", ".Rmd", ".RMD"]
+  data_extensions: [".csv", ".CSV", ".rds", ".RDS", ".rda", ".RData", ".xlsx", ".xls", ".dta"]
+  exclude_dirs: ["_dependency_analysis", ".git", ".Rproj.user", "renv", ".Rhistory"]
+
+# Data inspection
+data:
+  sample_rows: 5
+  # Stata (.dta): detect and include in graph, but do not read contents
+  stata_read_contents: false
+
+# Output
+output:
+  dir_name: "_dependency_analysis"  # Created inside target project
+  master_file: "master_summary.md"
+  viz_file: "dependency_graph.html"

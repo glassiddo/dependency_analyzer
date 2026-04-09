@@ -1,0 +1,138 @@
+---
+title: "Data construction and adding a new census country"
+author: "Iddo Glass"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+---
+
+```{r setup, echo = F, warning = F, message = F, include = F}
+options(repos = c(CRAN = "https://cran.rstudio.com/"))
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+#### Prerequesists
+
+1. At least one census of the country
+
+2. Shapefile with level 1 or level 2 of the country
+
+These can be extracted using the IPUMS website (need to request access first), or using $ipumsr$ R package, which can be scraped directly from code/Build/Census/1-Scrape-IPUMS.R
+
+If not from IPUMS - more complicated, as the admin units, migration variables, employment and industry variables should be consistent. Please see the examples in Build/Census/
+
+#### SSA_env_SetUp.R 
+
+The setup file. Loads packages etc, so might need to download some
+
+- If adding a new country/changing an existing country's censuses, *update data/census_years.csv* with the admin level used, the census years, and whether the country uses prime_age for its population, employment and migration variables
+
+- Make sure that the country exists in various functions there - *n_ctry* (return country name from 3 letter ISO code), and *g_ctry3* (does the opposite, from country name to ISO3)
+
+General tip that's useful here - Ctrl+Shift+F in RStudio allows you to look for a string in a folder. Running it in the entire folder takes time but in code/Build it's quick. Although take into account that the old maps might be used in GEE / stata.
+
+#### code/Build/Census
+
+- 1-Scrape-IPUMS.R uses the R package *ipumsr* to extract census from the IPUMS API. You need an API key which you get after requesting access in the IPUMS website. Alternatively the census can be extracted directly from the IPUMS website. The Census data should be located in a country-specific folder, in data/Raw/Countries/ctry_str/Census (ctry_str in ISO3)
+
+- 1-XC_census_year.R cleans the census data. Some things to look out for - 1) the geographic level (1/2) - if both exist, the code should account for both, but if only level 1 exists, only account for it; 2) the variable that refers to employment industry (usually indgen); 3) the naming of geographical units, compared to the IPUMS files. Names mismatch shouldn't be an issue normally, but could exist for example if the census was downloaded more recently than the master map. 
+
+Note - make sure that in the prev_country_name, the country of analysis (of the census itself) doesn't appear. If there was internal migration, prev_country_name should be NA and it should only be accounted for through the internal migration variables
+
+- 4-census-ipums-xwalk.R - *not sure what it's used for.* Add the new country and run it. The codes that precede it, 2-SAF-IPUMS-xwalk.R and 3-SAF-census.R are specific to South Africa.
+
+#### code/Final/1-ID.R
+
+1-ID.R - generally only requires adding the country as a chunk like the others, and as always making sure that the results make sense and nothing else is broken... this code needs to be run early as many codes including in Build are using it
+
+#### code/Build/Maps
+
+Make sure that the masters map (shapefile which is used for various things such as the distances calculation, and GEE code) includes *the most updated version* of the IPUMS map of the country you're adding. If not, then you need to update the masters map. However, IPUMS did some changes to regions in countries that were already processed in various bits of the code, and we may not want to change the files for them (unless you're willing to undertake a larger restructuring of the code). Hence, the idea is to stick with the old IPUMS map for of the countries that already appear in the data, and only integrate the bit of the new IPUMS map of the country you're adding. 
+
+The new IPUMS map can be downloaded from https://international.ipums.org/international/gis.shtml
+
+The code that updates the map is the following - it requires the IPUMS country code which can be found in SSA_env_SetUp.R/ipums_country_codes
+0-update_masters_map_new_ctry.R
+
+1-build.centroids.R - add the country name to the list. africa_sf should be the new masters map that you updated (if you did) in maps/0-update_masters_map_new_ctry.R
+
+this file needs to be run as part of the master's file, regardless of whether we add a new country or not!
+
+2-SampleUnit-SF.R - generally nothing needs to be done except for running it and ensuring it doesn't break + adds the new units properly. It takes mines map from https://geoportal.icpac.net 
+
+Once you update the map, various things that use the old map may need to be updated. Upload the new file generated in SampleUnit-SF.R to Google Earth Engine (GEE) as various maps are created there.
+
+#### GEE code 
+
+Upload the masters map to Google Earth Engine. Need access to the folder users/houngbedjiken/afrmigdefo (owned by Ken) where the codes are located, and to the cloud folder ee-himww where the assets that are used in the GEE codes are located. The sample units map in GEE is currently (28/10/25) names as projects/ee-himww/assets/SampleUnits
+
+Many of our raw dfs are created in GEE, when values from various geospatial datasets are allocated to admin units. They are exported to the Google Drive folder AFRMIGDEFO. After running the various codes and exporting the csv files to the drive folder, download them and put them in the relevant folders.
+
+Run the various codes and download the csv files and put in the relevant folders
+
+#### Forest
+
+Run the forest files in GEE (ADMUNITGFCTC and ADMUNITGFCTCLOSS) to generate sampleUnitsTreeCover.csv and sampleUnitsTreeCoverLoss.csv with the new sample units' shapefile. 
+
+Then, run Build/Forest/00-Forest_cutoffs.R. Finally, run Final/2-ForestLoss_cuts.R
+
+#### Crop area, MODIS_LC, MODIS_VCF and TMF
+
+MODIS_LC - run ADMUNITLC in GEE to get the updated sampleUnitslc_ csv files and run Build/MODIS_LC/process_delta_types.R
+
+TMF - run ADMUNITTMF in GEE to get MPIOTMF.csv, then run Build/Tropical Moist Forests/tmf.R
+
+Crop area - run ADMUNITCROPLAND in GEE to get IPUMSADMUNITCROPLAND.csv, then run Build/Crop Area/crop_area.R
+
+MODIS_VCF - the most tricky one. modis_vcf.R is easy, run the GEE files and then the R code. GAFTC is trickier - if there are new shapefiles, need to run 1-read and clean gaftc.R, which requires downloading (heavy) tif files and re-running the code. Then run 2-merge globmap fc.R
+
+No changes should be required to those codes, but *need to have an updated version of the files generated by 2-ForestLoss_cuts.R* (for the forest loss years, which aren't the same as the census years)
+
+#### GAEZ
+
+Need to update the files in GEE and then probably just run the stata files - I'll update it at some point but Ken is working with this code
+
+#### Mines
+
+Work in progress, it generally runs fine and need the sample maps and ID.rds but need to clean the code 4-build_mine_instr.R and fix the choice of years there - they should follow predetermined years (either from forestloss.rds or census_info.csv) with some clearer explanation to what would happen for single census countries.
+
+#### NightLight 
+
+With the updated GEE files, run the two stata codes in Build/Night Light to get an updated version of SampleNTLGDP.dta - then run Final/3-NightLight.R 
+
+Note that the "haromnized" variables in the final df are older, so they won't be updated with the new units (see explanation in the beginning of 3-NightLight.R)
+
+#### Employment, population and migration
+
+4-Population.R - add the country, assuming it's a single census country then also to single_cens_ctries and run
+
+5-Employment.R - similar to population
+
+6A-full_migration_census_1.R and 6B-full_migration_census_2.R - if it's a single census country, add only to one of those, depending on the year of the census (if close to 2000, probably use 6A as it refers normally to the first census). yr_start_dic and yr_end_dic should be used only if the country has MIGYRS1 or is South Africa. period_dic is determined I think based on the variable of the census used (when was the previous place of residence observed?), if it's null but the country is in the list in the beginning then the previous admin unit is unit of birth
+
+#### Urban and distance
+
+Start in Build/Africopolis - run 1-read_africapolis.R with the new sample unit map and then 2-make_africapolis_map.R
+
+Then go to Build/Urban. Go to 1-build_dist_urb.R - add the country as a chunk and run. Then run without adjustments 2-scrape_travel_time should be run again without any adjustments, unless there are islands or specific fixes necessary like in Tanzania. It takes a bit of time to run. Go to 3-distance.R - add the country to the list and run. 
+Then go to the Final/ folder - none of those codes should require any adjustments, run the following:
+
+7A-full_distance.R requires 1-build_centroids.R AND the migration codes in Final/ (6A_full_migration_census1.R and 6B_full_migration_census2.R)
+
+7B-osm_distance.R requires 3-scrape_travel_time.R and 3-distance.R, no need to do anything
+
+8-urban.R - requires 1-build_dist_urb.R before, add the country
+
+#### GDP and Trade
+
+To get what the agricultural export/import is for each country as a share of its GDP in 2000, there are two files - GDP and trade.
+The stata file code/Build/GDP/gdp.do generates the gdp of the agricultural sector in each country in each year. It works based on country name and already includes all African countries.
+
+Then, code/Build/Trade/1 Make Trade Clean.do takes a trade dataset to get the relevant values for each country. It is cleaned there and joined with the gdp (the values are not referring to 2000/2010/2020 - but to averages of values around that year). The country name needs to be added manually there, and need to make sure that the country name fits the one that's created in gdp.do (ideally this should all be based on country codes, either ipums code or iso3)
+
+In trade - there's port_cities_multiple.csv and need to add manually the ipums_id (with 1, no need to add the others with 0s) where the main ports / access points of the country are located.
+
+#### Final 
+
+Run (in that order) 9-bartiks.R, 10-merge.R, both require various datasets that are created before. 9-bartiks could be further cleaned probably
+then run 11_clean_merged_data.do
