@@ -186,6 +186,21 @@ fread(paste0(ctries_dir, "AGO.csv"))             # should resolve to "data/Build
 
 ---
 
+## Git Sync (avoid local vs GitHub drift)
+
+To keep your local checkout aligned with GitHub:
+
+- Before starting work: `git pull --ff-only origin main`
+- Before pushing: `git fetch origin` then `git status -sb` (ensure you are not behind `origin/main`)
+- When you have local experiments you do not want to commit: `git stash push -u -m "wip"` (or commit on a feature branch)
+- Quick equality check: `git rev-parse HEAD` and `git rev-parse origin/main` (they should match when synced)
+
+If Git errors with `.git/index.lock` permission denied on Windows, reset the `.git` ACLs from an elevated PowerShell:
+
+- `icacls .git /reset /T /C`
+
+---
+
 ## Test Projects
 
 Three example projects (code-only, no data) are available in the parent folder:
