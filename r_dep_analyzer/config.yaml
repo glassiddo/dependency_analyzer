@@ -1,20 +1,19 @@
-# R Dependency Analyzer - Configuration
-# Run: Rscript run_analysis.R /path/to/your/research/project
-
-# File patterns to scan
+# r_dep_analyzer config (YAML)
+version: 2
 scan:
-  r_extensions: [".R", ".r", ".Rmd", ".RMD"]
-  data_extensions: [".csv", ".CSV", ".rds", ".RDS", ".rda", ".RData", ".xlsx", ".xls", ".dta"]
-  exclude_dirs: ["_dependency_analysis", ".git", ".Rproj.user", "renv", ".Rhistory"]
-
-# Data inspection
+  r_extensions: [.R, .r, .Rmd, .RMD]
+  data_extensions: [.csv, .CSV, .rds, .RDS, .rda, .RData, .xlsx, .xls, .dta]
+  exclude_dirs: [_dependency_analysis, .git, .Rproj.user, renv, .Rhistory]
 data:
   sample_rows: 5
-  # Stata (.dta): detect and include in graph, but do not read contents
   stata_read_contents: false
-
-# Output
 output:
-  dir_name: "_dependency_analysis"  # Created inside target project
-  master_file: "master_summary.md"
-  viz_file: "dependency_graph.html"
+  dir_name: _dependency_analysis
+  master_file: master_summary.md
+  viz_file: dependency_graph.html
+graph:
+  roots: []
+  show_meta: false
+  show_independent: false
+  exclude: []
+  meta_patterns: [setup.py, pyproject.toml, requirements*.txt, Pipfile, poetry.lock, package.json, package-lock.json, pnpm-lock.yaml, yarn.lock, tsconfig*.json, webpack*.js, vite.config.*, rollup.config.*, Makefile, CMakeLists.txt, Dockerfile, .github/workflows/*.yml, .github/workflows/*.yaml, *[Mm]aster*.R, *[Ss]etup*.R, *[Cc]onfig*.R, *[Ii]nit*.R, *_Master.do, *master*.do, *setup*.do]

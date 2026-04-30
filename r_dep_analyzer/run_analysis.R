@@ -18,22 +18,105 @@
 default_data_path <- ""
 
 args <- commandArgs(trailingOnly = TRUE)
-interactive_mode <- length(args) < 1
+
+print_usage <- function() {
+  message("Usage:")
+  message("  Rscript run_analysis.R <project_path> [exclude_folders]")
+  message("  Rscript run_analysis.R --config <config.yaml> <project_path>")
+  message("  Rscript run_analysis.R <project_path> --roots <file1,file2,...>")
+  message("Options:")
+  message("  --config <path>            Path to config.yaml (optional)")
+  message("  --roots <csv>              Comma-separated root files (relative to project)")
+  message("  --root <path>              Root file (repeatable)")
+  message("  --from <csv>               Alias for --roots")
+  message("  --show-meta                Include meta/setup/master files in rendered graph")
+  message("  --show-independent         Include independent scripts in rendered graph")
+  message("  --exclude <csv>            Glob patterns to exclude from rendered graph")
+  message("  --meta-pattern <glob>      Add a meta glob pattern (repeatable)")
+  message("  --help                     Show this help")
+  invisible(NULL)
+}
+
+parse_cli_args <- function(args) {
+  out <- list(
+    config_path = trimws(Sys.getenv("R_DEP_CONFIG_PATH", "")),
+    project_path = NULL,
+    exclude_folders = NULL,
+    roots = character(0),
+    show_meta = NA,
+    show_independent = NA,
+    exclude_patterns = character(0),
+    meta_patterns_add = character(0),
+    help = FALSE
+  )
+
+  i <- 1L
+  while (i <= length(args)) {
+    a <- args[[i]]
+    if (a %in% c("--help", "-h")) { out$help <- TRUE; i <- i + 1L; next }
+    if (a == "--config" && i + 1L <= length(args)) { out$config_path <- args[[i + 1L]]; i <- i + 2L; next }
+    if (a %in% c("--roots", "--from") && i + 1L <= length(args)) {
+      out$roots <- c(out$roots, trimws(strsplit(args[[i + 1L]], "[,;]+")[[1]]))
+      i <- i + 2L; next
+    }
+    if (a == "--root" && i + 1L <= length(args)) { out$roots <- c(out$roots, args[[i + 1L]]); i <- i + 2L; next }
+    if (a == "--show-meta") { out$show_meta <- TRUE; i <- i + 1L; next }
+    if (a == "--show-independent") { out$show_independent <- TRUE; i <- i + 1L; next }
+    if (a == "--exclude" && i + 1L <= length(args)) {
+      out$exclude_patterns <- c(out$exclude_patterns, trimws(strsplit(args[[i + 1L]], "[,;]+")[[1]]))
+      i <- i + 2L; next
+    }
+    if (a == "--meta-pattern" && i + 1L <= length(args)) { out$meta_patterns_add <- c(out$meta_patterns_add, args[[i + 1L]]); i <- i + 2L; next }
+
+    # Positional handling
+    if (is.null(out$project_path) && !startsWith(a, "--")) {
+      out$project_path <- a
+      i <- i + 1L
+      next
+    }
+    if (is.null(out$exclude_folders) && !startsWith(a, "--")) {
+      out$exclude_folders <- a
+      i <- i + 1L
+      next
+    }
+    i <- i + 1L
+  }
+
+  # Env roots (only if none provided via args)
+  env_roots <- trimws(Sys.getenv("R_DEP_ROOTS", ""))
+  if (length(out$roots) == 0 && nzchar(env_roots)) out$roots <- trimws(strsplit(env_roots, "[,;]+")[[1]])
+  env_show_meta <- trimws(Sys.getenv("R_DEP_SHOW_META", ""))
+  if (is.na(out$show_meta) && nzchar(env_show_meta)) out$show_meta <- tolower(env_show_meta) %in% c("1", "true", "yes", "y", "on")
+  env_show_indep <- trimws(Sys.getenv("R_DEP_SHOW_INDEPENDENT", ""))
+  if (is.na(out$show_independent) && nzchar(env_show_indep)) out$show_independent <- tolower(env_show_indep) %in% c("1", "true", "yes", "y", "on")
+
+  out$roots <- out$roots[nzchar(trimws(out$roots))]
+  out$exclude_patterns <- out$exclude_patterns[nzchar(trimws(out$exclude_patterns))]
+  out$meta_patterns_add <- out$meta_patterns_add[nzchar(trimws(out$meta_patterns_add))]
+
+  out
+}
+
+cli <- parse_cli_args(args)
+if (isTRUE(cli$help)) {
+  print_usage()
+  quit(save = "no", status = 0)
+}
+
+interactive_mode <- is.null(cli$project_path) || !nzchar(trimws(cli$project_path))
 if (interactive_mode) {
   project_path <- trimws(Sys.getenv("R_DEP_PROJECT_PATH", ""))
+  if (!nzchar(project_path)) project_path <- trimws(readline("Project path: "))
   if (!nzchar(project_path)) {
-    project_path <- trimws(readline("Project path: "))
-  }
-  if (!nzchar(project_path)) {
-    message("No project path provided. Use: Rscript run_analysis.R /path/to/project [exclude_folders]")
-    message("Or: Sys.setenv(R_DEP_PROJECT_PATH='C:/path/to/project'); source('run_analysis.R')")
+    message("No project path provided.")
+    print_usage()
     stop("Project path is required.")
   }
 } else {
-  project_path <- args[1]
+  project_path <- cli$project_path
 }
-exclude_folders <- if (length(args) >= 2 && nzchar(trimws(args[2]))) {
-  trimws(strsplit(trimws(args[2]), "[,;]+")[[1]])
+exclude_folders <- if (!is.null(cli$exclude_folders) && nzchar(trimws(cli$exclude_folders))) {
+  trimws(strsplit(trimws(cli$exclude_folders), "[,;]+")[[1]])
 } else {
   env_excl <- trimws(Sys.getenv("R_DEP_EXCLUDE_FOLDERS", ""))
   if (nzchar(env_excl)) trimws(strsplit(env_excl, "[,;]+")[[1]]) else character(0)
@@ -104,6 +187,53 @@ source(file.path(r_dir, "inspect_data.R"))
 source(file.path(r_dir, "build_graph.R"))
 source(file.path(r_dir, "detect_issues.R"))
 source(file.path(r_dir, "generate_outputs.R"))
+source(file.path(r_dir, "config.R"))
+
+to_rel_path <- function(project_path, p) {
+  if (!nzchar(p)) return("")
+  pp <- gsub("\\\\", "/", normalizePath(project_path, mustWork = FALSE))
+  p2 <- gsub("\\\\", "/", p)
+  # If already looks relative, keep it.
+  if (!dep_is_abs_path(p2)) return(gsub("^\\./", "", p2))
+  full <- normalizePath(p2, mustWork = FALSE)
+  full <- gsub("\\\\", "/", full)
+  if (startsWith(tolower(full), tolower(pp))) {
+    rel <- sub(paste0("^", gsub("([\\^\\$\\.|\\(\\)\\[\\]\\\\+\\*\\?\\{\\}])", "\\\\\\1", pp, perl = TRUE), "/?"), "", full, perl = TRUE)
+    return(gsub("^\\./", "", rel))
+  }
+  # Outside project: cannot relativize safely; return as-is (won't match parsed rel paths).
+  gsub("^\\./", "", p2)
+}
+
+detect_default_roots <- function(graph, parsed) {
+  roots <- character(0)
+  if (!is.null(parsed$master_path) && nzchar(parsed$master_path)) roots <- c(roots, parsed$master_path)
+  if (!is.null(parsed$stata_master_path) && nzchar(parsed$stata_master_path)) roots <- c(roots, parsed$stata_master_path)
+  roots <- unique(roots[nzchar(roots)])
+  if (length(roots) > 0) return(roots)
+
+  r_nodes <- graph$nodes$id[graph$nodes$type == "r_file"]
+  dep_edges <- graph$edges[graph$edges$type %in% c("sources", "data_flow", "pipeline") &
+                             graph$edges$from %in% r_nodes & graph$edges$to %in% r_nodes, , drop = FALSE]
+  if (nrow(dep_edges) == 0) return(r_nodes)
+  in_deg <- setNames(rep(0L, length(r_nodes)), r_nodes)
+  for (to in dep_edges$to) in_deg[to] <- in_deg[to] + 1L
+  roots <- names(in_deg)[in_deg == 0L]
+  if (length(roots) == 0) r_nodes else roots
+}
+
+# Config (optional; loaded after we locate script_dir)
+config_path <- trimws(cli$config_path %||% "")
+if (!nzchar(config_path)) config_path <- file.path(script_dir, "config.yaml")
+cfg_raw <- if (file.exists(config_path)) dep_yaml_read(config_path) else list()
+migr <- dep_migrate_config_in_memory(cfg_raw)
+cfg <- migr$config
+if (length(migr$warnings) > 0) message("Config: ", paste(migr$warnings, collapse = " "))
+
+if (length(cli$meta_patterns_add) > 0) cfg$graph$meta_patterns <- unique(c(cfg$graph$meta_patterns %||% character(0), cli$meta_patterns_add))
+if (length(cli$exclude_patterns) > 0) cfg$graph$exclude <- unique(c(cfg$graph$exclude %||% character(0), cli$exclude_patterns))
+if (!is.na(cli$show_meta)) cfg$graph$show_meta <- isTRUE(cli$show_meta)
+if (!is.na(cli$show_independent)) cfg$graph$show_independent <- isTRUE(cli$show_independent)
 
 message("Scanning project: ", project_path)
 
@@ -132,6 +262,36 @@ message("  Referenced datasets: ", nrow(data_info$index))
 graph <- build_dependency_graph(parsed, data_info, project_path, data_path = data_path)
 message("  Graph: ", length(graph$nodes$id), " nodes, ", nrow(graph$edges), " edges")
 
+# Roots (explicit > autodetect)
+explicit_roots <- character(0)
+if (length(cli$roots) > 0) {
+  explicit_roots <- vapply(cli$roots, function(p) to_rel_path(project_path, p), character(1))
+} else if (!is.null(cfg$graph$roots) && length(cfg$graph$roots) > 0) {
+  explicit_roots <- vapply(cfg$graph$roots, function(p) to_rel_path(project_path, p), character(1))
+}
+explicit_roots <- unique(dep_path_norm(explicit_roots[nzchar(explicit_roots)]))
+detected_roots <- character(0)
+if (length(explicit_roots) > 0) {
+  message("  Roots (explicit): ", paste(explicit_roots, collapse = ", "))
+} else {
+  detected_roots <- detect_default_roots(graph, parsed)
+  detected_roots <- unique(dep_path_norm(detected_roots[nzchar(detected_roots)]))
+  message("  Roots (detected): ", paste(detected_roots, collapse = ", "))
+  message("    Override with: --roots <file1,file2,...> (or set graph.roots in config)")
+}
+
+# IMPORTANT UX: only user-provided roots are treated as "roots" for filtering logic.
+# Autodetected roots are informational only (displayed in the report and logs).
+user_roots <- explicit_roots
+roots_display <- if (length(user_roots) > 0) user_roots else detected_roots
+
+viz_options <- list(
+  meta_patterns = cfg$graph$meta_patterns %||% character(0),
+  exclude_patterns = cfg$graph$exclude %||% character(0),
+  show_meta_default = isTRUE(cfg$graph$show_meta %||% FALSE),
+  show_independent_default = isTRUE(cfg$graph$show_independent %||% FALSE)
+)
+
 # 5. Detect issues
 issues <- detect_issues(graph, parsed, data_info, project_path)
 message("  Issues found: ", nrow(issues))
@@ -145,7 +305,13 @@ if (nzchar(Sys.getenv("R_DEP_MASTER_SUMMARY", "0")) && Sys.getenv("R_DEP_MASTER_
   message("  Wrote: ", file.path(out_dir, "master_summary.md"))
 }
 
-generate_visualization(graph, issues, parsed, data_info, project_path, out_dir, project_name = project_name)
+generate_visualization(
+  graph, issues, parsed, data_info, project_path, out_dir,
+  project_name = project_name,
+  roots = user_roots,
+  roots_display = roots_display,
+  viz_options = viz_options
+)
 message("  Wrote: ", file.path(out_dir, "dependency_graph.html"))
 
 message("Done. Open ", file.path(out_dir, "dependency_graph.html"), " in a browser.")
