@@ -16,6 +16,9 @@ thesis/
 # Temp/scratch files
 r_dep_analyzer/check_issues.R
 
+# Generated dependency analysis outputs
+**/_dependency_analysis/
+
 # R session files
 .Rhistory
 .RData
