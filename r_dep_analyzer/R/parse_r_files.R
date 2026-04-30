@@ -529,7 +529,7 @@ stata_path_to_project_relative <- function(p, project_path) {
     return(p)
   }
 
-  # External absolute path: avoid creating junk dataset IDs like "C:/Users/...".
+  # External absolute path: avoid creating junk dataset IDs like "C:/path/to/...".
   # Prefer canonical project-style data paths if we can anchor on /data/ or a Raw/Build/Final tier.
   # Otherwise, keep only the basename as a match key.
   p2 <- normalize_path_canonical(p_abs)
@@ -1774,7 +1774,7 @@ canonicalization_sanity_checks <- function() {
   if (!identical(a, "data/Final/x.dta")) stop("canonicalization sanity check failed: expected 'data/Final/x.dta', got: ", a)
   b <- normalize_path_canonical("africa/artisanal/data/Raw/x.dta")
   if (!identical(b, "africa/artisanal/data/Raw/x.dta")) stop("canonicalization sanity check failed for repo-relative nested data path: ", b)
-  c <- canonical_data_id("C:/Users/me/Dropbox/Migration Africa/data/BUILD/x.dta")
+  c <- canonical_data_id("C:/path/to/project/data/BUILD/x.dta")
   if (!identical(c, "data/Build/x.dta")) stop("canonicalization sanity check failed for absolute data tier: ", c)
   invisible(TRUE)
 }

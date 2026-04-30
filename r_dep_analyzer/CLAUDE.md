@@ -1,6 +1,6 @@
 # CLAUDE.md — Development Guide for R Dependency Analyzer
 
-This file documents the architecture, known bugs, and desired output spec for this tool. Read it before making any changes.
+This file documents the architecture, known issues, and desired output spec for this tool. Read it before making any changes.
 
 ---
 
@@ -23,7 +23,10 @@ R/
   build_graph.R           Step 4. Build dependency graph nodes/edges from parsed data.
   detect_issues.R         Step 5. Detect circular deps, missing files, wrong deps, etc.
   generate_outputs.R      Step 6. Generate dependency_graph.html and optional master_summary.md.
-config.yaml               (unused currently; reserved for future configuration)
+  config.R                Config parsing and defaults.
+  data_scan.R             Dataset scanning helpers.
+  dataset_index.R         Dataset index construction.
+config.yaml               Optional runtime config (`run_analysis.R --config <path>`).
 ```
 
 ### Data flow through `parse_r_project` (in `parse_r_files.R`)
@@ -39,51 +42,25 @@ list.files(project_path)
   → return list(files = parsed, setup_vars = ..., master_path = ..., ...)
 ```
 
-After `parse_r_project`, the returned object is `parsed` with `parsed$files` = the flat list.
-Inside `parse_r_project`, before the return, `parsed` IS the flat list (no `$files` key yet).
+After `parse_r_project`, the returned object includes the flat list as `parsed$files`.
 
 ---
 
-## Critical Bugs
+## Known issues / notes
 
-### BUG 1 — Setup vars never extracted (root cause of most path resolution failures)
+### Windows + portability guardrails (avoid regressions)
 
-**File**: `R/parse_r_files.R`  
-**Impact**: Paths like `build.dir/Countries/file.csv` stay as-is instead of resolving to `data/Build/Countries/file.csv`. All path-based edges in the graph are wrong. Execution order is wrong. Dataset index is incomplete.
+- Do not add machine-specific absolute paths in code, examples, or tests (use `C:/path/to/...` placeholders at most).
+- Do not add hardcoded debug log file outputs.
+- Keep `default_data_path` empty unless there is a strong reason (prefer env vars / config).
 
-**Root cause**: Inside `parse_r_project`, `parsed` is a flat named list keyed by relative file paths. The helper functions are called **before** the final `list(files = parsed, ...)` wrapping, so they receive the flat list. But all four helpers incorrectly access `parsed$files` which is `NULL` at that point:
+### Potential improvement — Local path variables not always captured
 
-| Function | Broken access | Consequence |
-|---|---|---|
-| `parse_setup_vars(parsed)` | `names(parsed$files)`, `vapply(parsed$files, ...)`, `parsed$files[[rel]]` | Returns empty `vars` → no setup vars |
-| `infer_stata_globals_from_r(parsed, ...)` | `names(parsed$files)`, `parsed$files[[rel]]$path` | Returns empty → no Stata globals inferred |
-| `parse_stata_globals(parsed)` | `names(parsed$files)`, `parsed$files[[rel]]$path` | Returns empty → no Stata globals |
-| `resolve_paths_with_setup(parsed, ...)` | `parsed$project_path` (NULL), `names(parsed$files)` | No-op → paths stay unresolved |
+**Context**: A build script may define `ctries_dir <- paste0(build.dir, "Countries/")` and then use `fread(paste0(ctries_dir, "file.csv"))`. The tool should resolve `ctries_dir` within that file's scope.
 
-Also, `discover_master_and_path_roots(project_path, names(parsed$files), setup_vars)` passes `NULL` as `rel_paths` so it detects nothing.
+**Current behaviour**: `local_path_vars` may miss some composed assignments (e.g. `paste0(setup_var, "suffix")`), so paths can remain partially unresolved.
 
-**Fix**:
-1. In `parse_setup_vars`, `infer_stata_globals_from_r`, `parse_stata_globals`: replace every `parsed$files` with `parsed`.
-2. In `resolve_paths_with_setup`: add `project_path` as a 3rd parameter (it currently tries `parsed$project_path` which is NULL). Replace `parsed$files` with `parsed`. Update call at line 78 to: `parsed <- resolve_paths_with_setup(parsed, setup_vars, project_path)`.
-3. In `parse_r_project` line 81: change `names(parsed$files)` to `names(parsed)`.
-
-### BUG 2 — Hardcoded debug log lines
-
-**File**: `R/parse_r_files.R`, lines ~56–71 and ~246–261  
-**Impact**: Writes to `c:/Users/iddo2/cursor_test/debug-c0a103.log` (fails silently on other machines, but is dead code).  
-**Fix**: Remove both `#region agent log ... #endregion` blocks entirely.
-
-### BUG 3 — Hardcoded default data path in entry point
-
-**File**: `run_analysis.R`, line 18  
-**Impact**: `default_data_path <- "C:\\Users\\iddo2\\Dropbox\\Migration Africa\\data"` — hardcoded to one machine/project.  
-**Fix**: Change to `default_data_path <- ""` (empty string). Users should set `R_DEP_DATA_PATH` or be prompted.
-
-### BUG 4 — Local path variables not reliably captured
-
-**Context**: A build script may define `ctries_dir <- paste0(build.dir, "Countries/")` and then use `fread(paste0(ctries_dir, "file.csv"))`. The tool should resolve `ctries_dir` within that file's scope.  
-**Current behaviour**: `local_path_vars` are extracted from simple assignments (`var <- "literal/path"`) but not from `paste0(setup_var, "suffix")` assignments. So `ctries_dir` is not in local_vars.  
-**Fix**: In `parse_single_r_file`, also extract assignments of the form `var <- paste0(other_var, "suffix")` as local path vars. After setup_vars is resolved, substitute the rhs vars to build the full path value. Store as `local_path_vars[var]`.
+**Possible fix**: In `parse_single_r_file`, also extract assignments of the form `var <- paste0(other_var, "suffix")` as local path vars. After setup vars are resolved, substitute rhs vars to build the full path value. Store as `local_path_vars[var]`.
 
 ---
 
@@ -95,7 +72,7 @@ The HTML report should be a clean, single-page document with a fixed sidebar for
 
 #### 1. Header
 - Project name, date generated, quick stats line: "N scripts · M datasets referenced · K issues"
-- No "project overview" prose section — it's not useful.
+- No "project overview" prose section — it’s not useful.
 
 #### 2. Dependency Graph (main section)
 - Full-width interactive vis-network graph (600px height minimum)
@@ -121,7 +98,6 @@ The HTML report should be a clean, single-page document with a fixed sidebar for
   - Reads: resolved dataset paths (not raw variable expressions)
   - Writes: resolved dataset paths
   - Libraries (for setup file and unique libs only)
-- Currently misses some files and shows unresolved paths like `build.dir/ctries_dir` — fixed by BUG 1
 
 #### 5. Dataset Index
 - Keep organized by folder
@@ -164,13 +140,11 @@ These become `setup_vars["build.dir"] = "data/Build/"` etc.
 **Stage 2 — Local vars** (per-file, from local assignments):
 ```r
 # In a Build script
-ctries_dir <- paste0(build.dir, "Countries/")   # should resolve to "data/Build/Countries/"
-fread(paste0(ctries_dir, "AGO.csv"))             # should resolve to "data/Build/Countries/AGO.csv"
+ctries_dir <- paste0(build.dir, "Countries/")    # "data/Build/Countries/"
+fread(paste0(ctries_dir, "AGO.csv"))             # "data/Build/Countries/AGO.csv"
 ```
 
-`resolve_path_args` splits paths on `/` and substitutes each segment. For `ctries_dir/AGO.csv` to resolve, `ctries_dir` must be in `all_vars`. This only works after local_path_vars extraction is fixed (BUG 4).
-
-**Stata globals**: Set by R via `paste0('global build "', normalizePath(build.dir, ...), '"')`. Resolved by `infer_stata_globals_from_r`. In .do files, paths use `"${build}/Countries/AGO.dta"` → substituted to `"data/Build/Countries/AGO.dta"` → made project-relative.
+**Stata globals**: Set by R via `paste0('global build "', normalizePath(build.dir, ...), '"')`. In .do files, paths can use `"${build}/Countries/AGO.dta"` which should resolve to `"data/Build/Countries/AGO.dta"` and then be made project-relative.
 
 ---
 
@@ -207,12 +181,14 @@ Three example projects (code-only, no data) are available in the parent folder:
 
 | Project | Setup file | Notes |
 |---|---|---|
-| `migration/` | `code/SSA_env_SetUp.R` | R + Stata, most complex; main test case |
-| `conflict/` | TBD | R only |
+| `migration/` | `code/_Master.do` (detected root) | R + Stata, most complex; main test case |
+| `conflict/` | (auto-detected roots) | R only |
 | `thesis/` | TBD | R only |
 
-Run the tool against `migration/` to verify fixes:
+Run the tool against `migration/` to verify fixes (from repo root):
 ```bash
-Rscript run_analysis.R C:/Users/iddo2/dependency_analyzer/migration
+Rscript .\\r_dep_analyzer\\run_analysis.R --config .\\r_dep_analyzer\\config.yaml .\\migration
 ```
-After BUG 1 is fixed, `_dependency_analysis/path_setup.txt` should show `build.dir`, `raw.dir`, `out.dir`, etc. under `setup_path_vars`. Paths in the HTML file index should show `data/Build/...` not `build.dir/...`.
+
+Verify that the HTML file index shows resolved paths like `data/Build/...` rather than unresolved tokens like `build.dir/...`.
+
