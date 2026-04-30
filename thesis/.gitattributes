@@ -1,0 +1,10 @@
+# Normalize text files for this example project subtree.
+* text=auto
+
+*.R     text eol=lf
+*.Rmd   text eol=lf
+*.do    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.md    text eol=lf
+

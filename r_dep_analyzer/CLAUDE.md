@@ -172,6 +172,7 @@ To keep your local checkout aligned with GitHub:
 If Git errors with `.git/index.lock` permission denied on Windows, reset the `.git` ACLs from an elevated PowerShell:
 
 - `icacls .git /reset /T /C`
+- Or run: `powershell -NoProfile -ExecutionPolicy Bypass -File .\\r_dep_analyzer\\tools\\reset-git-acl.ps1`
 
 ---
 
@@ -191,4 +192,3 @@ Rscript .\\r_dep_analyzer\\run_analysis.R --config .\\r_dep_analyzer\\config.yam
 ```
 
 Verify that the HTML file index shows resolved paths like `data/Build/...` rather than unresolved tokens like `build.dir/...`.
-

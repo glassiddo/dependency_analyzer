@@ -1,4 +1,4 @@
-# Normalize text files and reduce cross-platform line-ending noise.
+# Normalize text files for this example project subtree.
 * text=auto
 
 *.R     text eol=lf
@@ -7,5 +7,4 @@
 *.yaml  text eol=lf
 *.yml   text eol=lf
 *.md    text eol=lf
-*.ps1   text eol=crlf
 
