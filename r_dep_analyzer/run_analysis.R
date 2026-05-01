@@ -207,19 +207,24 @@ to_rel_path <- function(project_path, p) {
 
 detect_default_roots <- function(graph, parsed) {
   roots <- character(0)
-  if (!is.null(parsed$master_path) && nzchar(parsed$master_path)) roots <- c(roots, parsed$master_path)
-  if (!is.null(parsed$stata_master_path) && nzchar(parsed$stata_master_path)) roots <- c(roots, parsed$stata_master_path)
+  role_map <- if ("role" %in% names(graph$nodes)) setNames(graph$nodes$role, graph$nodes$id) else character(0)
+  if (!is.null(parsed$master_path) && nzchar(parsed$master_path) && !identical(role_map[[parsed$master_path]], "archived")) roots <- c(roots, parsed$master_path)
+  if (!is.null(parsed$stata_master_path) && nzchar(parsed$stata_master_path) && !identical(role_map[[parsed$stata_master_path]], "archived")) roots <- c(roots, parsed$stata_master_path)
   roots <- unique(roots[nzchar(roots)])
   if (length(roots) > 0) return(roots)
 
-  r_nodes <- graph$nodes$id[graph$nodes$type == "r_file"]
-  dep_edges <- graph$edges[graph$edges$type %in% c("sources", "data_flow", "pipeline") &
+  included <- if ("included" %in% names(graph$nodes)) graph$nodes$included else rep(TRUE, nrow(graph$nodes))
+  role <- if ("role" %in% names(graph$nodes)) graph$nodes$role else rep("unknown", nrow(graph$nodes))
+  r_nodes <- graph$nodes$id[graph$nodes$type == "script" & included & role != "archived"]
+  dep_edges <- graph$edges[graph$edges$type %in% c("source_run", "sources", "data_flow", "pipeline") &
                              graph$edges$from %in% r_nodes & graph$edges$to %in% r_nodes, , drop = FALSE]
-  if (nrow(dep_edges) == 0) return(r_nodes)
+  if (nrow(dep_edges) == 0) return(character(0))
   in_deg <- setNames(rep(0L, length(r_nodes)), r_nodes)
+  out_deg <- setNames(rep(0L, length(r_nodes)), r_nodes)
   for (to in dep_edges$to) in_deg[to] <- in_deg[to] + 1L
-  roots <- names(in_deg)[in_deg == 0L]
-  if (length(roots) == 0) r_nodes else roots
+  for (from in dep_edges$from) out_deg[from] <- out_deg[from] + 1L
+  roots <- names(in_deg)[in_deg == 0L & out_deg > 0L]
+  if (length(roots) == 0) names(in_deg)[in_deg == 0L] else roots
 }
 
 # Config (optional; loaded after we locate script_dir)
@@ -259,7 +264,8 @@ data_info <- inspect_referenced_data(parsed, project_path, data_path = data_path
 message("  Referenced datasets: ", nrow(data_info$index))
 
 # 4. Build dependency graph
-graph <- build_dependency_graph(parsed, data_info, project_path, data_path = data_path)
+graph <- build_dependency_graph(parsed, data_info, project_path, data_path = data_path, config = cfg)
+parsed$setup_master_candidates <- graph$setup_master_candidates
 message("  Graph: ", length(graph$nodes$id), " nodes, ", nrow(graph$edges), " edges")
 
 # Roots (explicit > autodetect)
@@ -268,6 +274,8 @@ if (length(cli$roots) > 0) {
   explicit_roots <- vapply(cli$roots, function(p) to_rel_path(project_path, p), character(1))
 } else if (!is.null(cfg$graph$roots) && length(cfg$graph$roots) > 0) {
   explicit_roots <- vapply(cfg$graph$roots, function(p) to_rel_path(project_path, p), character(1))
+} else if (!is.null(cfg$roots) && length(cfg$roots) > 0) {
+  explicit_roots <- vapply(cfg$roots, function(p) to_rel_path(project_path, p), character(1))
 }
 explicit_roots <- unique(dep_path_norm(explicit_roots[nzchar(explicit_roots)]))
 detected_roots <- character(0)
@@ -289,7 +297,9 @@ viz_options <- list(
   meta_patterns = cfg$graph$meta_patterns %||% character(0),
   exclude_patterns = cfg$graph$exclude %||% character(0),
   show_meta_default = isTRUE(cfg$graph$show_meta %||% FALSE),
-  show_independent_default = isTRUE(cfg$graph$show_independent %||% FALSE)
+  show_independent_default = isTRUE(cfg$graph$show_independent %||% FALSE),
+  show_archived = isTRUE(cfg$graph$show_archived %||% FALSE),
+  show_low_confidence_edges = isTRUE(cfg$graph$show_low_confidence_edges %||% TRUE)
 )
 
 # 5. Detect issues
@@ -304,6 +314,17 @@ if (nzchar(Sys.getenv("R_DEP_MASTER_SUMMARY", "0")) && Sys.getenv("R_DEP_MASTER_
   generate_master_summary(graph, issues, parsed, data_info, project_path, out_dir)
   message("  Wrote: ", file.path(out_dir, "master_summary.md"))
 }
+
+write_structured_outputs(
+  graph, issues, parsed, data_info, project_path, out_dir,
+  project_name = project_name,
+  roots = roots_display
+)
+message("  Wrote: ", file.path(out_dir, "dependency_graph.json"))
+message("  Wrote: ", file.path(out_dir, "nodes.csv"))
+message("  Wrote: ", file.path(out_dir, "edges.csv"))
+message("  Wrote: ", file.path(out_dir, "issues.csv"))
+message("  Wrote: ", file.path(out_dir, "agent_context.md"))
 
 generate_visualization(
   graph, issues, parsed, data_info, project_path, out_dir,

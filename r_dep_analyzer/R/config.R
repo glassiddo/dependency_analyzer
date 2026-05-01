@@ -28,8 +28,15 @@ dep_default_config <- function() {
       master_file = "master_summary.md",
       viz_file = "dependency_graph.html"
     ),
+    setup_files = character(0),
+    master_files = character(0),
+    exclude_dirs = c("Archive", "archive", "archives", "old", "Old", "backup", "Backup"),
+    include_dirs = character(0),
+    roots = character(0),
     graph = list(
       roots = character(0),
+      show_archived = FALSE,
+      show_low_confidence_edges = TRUE,
       show_meta = FALSE,
       show_independent = FALSE,
       exclude = character(0),

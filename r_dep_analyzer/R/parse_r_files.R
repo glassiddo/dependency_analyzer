@@ -10,9 +10,10 @@ parse_r_project <- function(project_path, exclude_folders = character(0)) {
   do_ext <- c("\\.do$", "\\.DO$")
   exclude <- c("_dependency_analysis", ".git", ".Rproj.user", "renv", ".Rhistory")
   
-  include_archive <- nzchar(Sys.getenv("R_DEP_INCLUDE_ARCHIVE", "")) && tolower(Sys.getenv("R_DEP_INCLUDE_ARCHIVE")) %in% c("1", "true", "yes")
-  default_excl <- if (!include_archive) c("Archive", "archive", "Archives", "archives") else character(0)
-  exclude_folders <- unique(c(default_excl, exclude_folders))
+  # Archive/old folders are parsed, then marked as excluded from the default graph
+  # by build_dependency_graph(). This keeps references to archived code visible
+  # without pretending archived code is part of the active pipeline.
+  exclude_folders <- unique(exclude_folders)
   
   all_files <- list.files(project_path, recursive = TRUE, full.names = TRUE)
   r_files <- all_files[grepl(paste(r_ext, collapse = "|"), all_files, ignore.case = TRUE)]
@@ -2677,7 +2678,7 @@ resolve_local_path_vars <- function(local_vars, setup_vars) {
       base <- parts[1]
       suf <- paste(parts[-1], collapse = ":")
       base_val <- all_vars[base]
-      if (length(base_val) == 0 || !nzchar(base_val) || startsWith(base_val, "__p0__:")) next
+      if (length(base_val) == 0 || is.na(base_val) || !nzchar(base_val) || startsWith(base_val, "__p0__:")) next
       base_val <- sub("/+$", "", normalize_path_canonical(base_val))
       suf <- normalize_path_canonical(suf)
       joined <- normalize_path_canonical(paste0(base_val, "/", suf))

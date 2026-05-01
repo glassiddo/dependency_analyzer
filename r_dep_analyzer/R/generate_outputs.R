@@ -15,6 +15,7 @@ write_path_setup_file <- function(parsed, project_path, out_dir) {
   setup_vars        <- parsed$setup_vars             %||% character(0)
   stata_global_debug <- parsed$stata_global_debug    %||% NULL
   setup_master_files <- parsed$setup_master_files    %||% character(0)
+  setup_master_candidates <- parsed$setup_master_candidates %||% NULL
   inference_warnings <- parsed$inference_warnings    %||% character(0)
   out_path <- file.path(out_dir, "path_setup.txt")
   con <- file(out_path, open = "w", encoding = "UTF-8")
@@ -30,6 +31,14 @@ write_path_setup_file <- function(parsed, project_path, out_dir) {
   writeLines("", con)
   writeLines("setup_or_master_files_scanned:", con)
   if (length(setup_master_files) > 0) writeLines(paste0("  - ", setup_master_files), con) else writeLines("  (none)", con)
+  writeLines("", con)
+  writeLines("setup_master_candidates:", con)
+  if (!is.null(setup_master_candidates) && nrow(setup_master_candidates) > 0) {
+    for (i in seq_len(nrow(setup_master_candidates))) {
+      row <- setup_master_candidates[i, ]
+      writeLines(paste0("  - ", row$path, " [", row$role, ", ", row$confidence, "] ", row$reason), con)
+    }
+  } else writeLines("  (none)", con)
   writeLines("", con)
   writeLines("path_roots_from_master:", con)
   if (length(path_roots_master) > 0) writeLines(paste0("  - ", path_roots_master), con) else writeLines("  (none)", con)
@@ -70,7 +79,7 @@ generate_master_summary <- function(graph, issues, parsed, data_info, project_pa
   on.exit(close(con))
   wl <- function(...) writeLines(paste(...), con)
   wl("# R Project Dependency Summary"); wl("")
-  n_r  <- sum(graph$nodes$type == "r_file")
+  n_r  <- sum(graph$nodes$type == "script")
   n_d  <- sum(graph$nodes$type == "data")
   wl("## Overview"); wl(paste("Scripts:", n_r)); wl(paste("Datasets:", n_d))
   wl(paste("Errors:", sum(issues$severity == "error")))
@@ -82,11 +91,19 @@ generate_master_summary <- function(graph, issues, parsed, data_info, project_pa
 }
 
 try_topological_order <- function(graph) {
-  r_edges <- graph$edges[graph$edges$type %in% c("sources", "data_flow"), ]
-  r_nodes <- graph$nodes$id[graph$nodes$type == "r_file"]
-  if (nrow(r_edges) == 0) return(r_nodes)
+  included <- if ("included" %in% names(graph$nodes)) graph$nodes$included else rep(TRUE, nrow(graph$nodes))
+  role <- if ("role" %in% names(graph$nodes)) graph$nodes$role else rep("unknown", nrow(graph$nodes))
+  r_edges <- graph$edges[graph$edges$type %in% c("source_run", "sources", "data_flow") & graph$edges$confidence != "low", ]
+  active_nodes <- graph$nodes$id[graph$nodes$type == "script" & included & role != "archived"]
+  active_edges <- r_edges[r_edges$from %in% active_nodes & r_edges$to %in% active_nodes, , drop = FALSE]
+  if (nrow(active_edges) == 0) return(character(0))
+  degree <- setNames(rep(0L, length(active_nodes)), active_nodes)
+  for (from in active_edges$from) degree[from] <- degree[from] + 1L
+  for (to in active_edges$to) degree[to] <- degree[to] + 1L
+  r_nodes <- names(degree)[degree > 0L]
+  if (length(r_nodes) == 0) return(character(0))
   sort_edges <- r_edges
-  src_idx <- r_edges$type == "sources"
+  src_idx <- r_edges$type %in% c("source_run", "sources")
   sort_edges[src_idx, c("from", "to")] <- r_edges[src_idx, c("to", "from")]
   # Defensive: drop edges that reference non-script nodes (e.g. missing sourced files).
   # This keeps igraph happy and matches the fallback behavior which only orders known scripts.
@@ -118,21 +135,307 @@ try_topological_order <- function(graph) {
 }
 
 get_used_unused_scripts <- function(graph, parsed) {
-  r_nodes <- graph$nodes$id[graph$nodes$type == "r_file"]
+  included <- if ("included" %in% names(graph$nodes)) graph$nodes$included else rep(TRUE, nrow(graph$nodes))
+  role <- if ("role" %in% names(graph$nodes)) graph$nodes$role else rep("unknown", nrow(graph$nodes))
+  r_nodes <- graph$nodes$id[graph$nodes$type == "script" & included & role != "archived"]
+  setup_nodes <- graph$nodes$id[graph$nodes$type == "script" & role == "setup"]
+  dep_edges <- graph$edges[graph$edges$type %in% c("source_run", "sources", "data_flow") &
+                             graph$edges$from %in% r_nodes & graph$edges$to %in% r_nodes &
+                             !(graph$edges$from %in% setup_nodes | graph$edges$to %in% setup_nodes), , drop = FALSE]
+  degree <- setNames(rep(0L, length(r_nodes)), r_nodes)
+  if (nrow(dep_edges) > 0) {
+    for (from in dep_edges$from) degree[from] <- degree[from] + 1L
+    for (to in dep_edges$to) degree[to] <- degree[to] + 1L
+  }
+  independent <- setdiff(names(degree)[degree == 0L], setup_nodes)
   ord <- try_topological_order(graph)
-  if (length(ord) == 0) ord <- r_nodes
-  # Include all scanned scripts in both the graph and the execution order, even if
-  # they have zero detected dependencies.
-  list(ord = ord, used = r_nodes, unused = character(0))
+  list(ord = ord, used = setdiff(ord, independent), unused = independent)
+}
+
+safe_table <- function(x, cols) {
+  if (is.null(x) || nrow(x) == 0) {
+    out <- as.data.frame(setNames(rep(list(character(0)), length(cols)), cols), stringsAsFactors = FALSE)
+    return(out)
+  }
+  for (col in cols) if (!(col %in% names(x))) x[[col]] <- NA
+  x[, cols, drop = FALSE]
+}
+
+ascii_text <- function(x) {
+  x <- as.character(x %||% "")
+  x <- gsub("\u2013|\u2014|\u2212", "-", x, perl = TRUE)
+  x <- gsub("\u2192|\u21d2", "->", x, perl = TRUE)
+  x <- gsub("\u2018|\u2019", "'", x, perl = TRUE)
+  x <- gsub("\u201c|\u201d", "\"", x, perl = TRUE)
+  x <- iconv(x, from = "", to = "ASCII//TRANSLIT", sub = "")
+  x[is.na(x)] <- ""
+  x
+}
+
+df_records <- function(df) {
+  if (is.null(df) || nrow(df) == 0) return(list())
+  lapply(seq_len(nrow(df)), function(i) {
+    row <- as.list(df[i, , drop = FALSE])
+    lapply(row, function(v) {
+      if (length(v) == 0 || is.na(v[1])) NULL else unname(v[1])
+    })
+  })
+}
+
+graph_artifact <- function(graph, issues, parsed, project_path, project_name = NULL, roots = character(0), notes = NULL) {
+  if (is.null(project_name) || !nzchar(project_name)) project_name <- basename(project_path)
+  nodes <- graph$nodes
+  edges <- graph$edges
+  issue_cols <- c("severity", "scope", "type", "path", "from", "to", "message", "confidence", "provenance")
+  issues <- safe_table(issues, issue_cols)
+  notes <- safe_table(notes %||% attr(issues, "notes") %||% data.frame(), issue_cols)
+  active_issue_n <- sum(issues$scope %in% c("active", "global"), na.rm = TRUE)
+  archived_issue_n <- sum(issues$scope == "archived", na.rm = TRUE)
+  list(
+    project = list(
+      name = project_name,
+      path = gsub("\\\\", "/", normalizePath(project_path, mustWork = FALSE)),
+      generated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+      tool_version = "2-static-auditor"
+    ),
+    summary = list(
+      scripts = sum(nodes$type == "script"),
+      active_scripts = sum(nodes$type == "script" & nodes$role != "archived" & nodes$included),
+      archived_scripts = sum(nodes$type == "script" & nodes$role == "archived"),
+      data_nodes = sum(nodes$type == "data"),
+      edges = nrow(edges),
+      actionable_issues = nrow(issues),
+      active_issues = active_issue_n,
+      archived_issues = archived_issue_n,
+      low_confidence_edges = sum(edges$confidence == "low", na.rm = TRUE)
+    ),
+    detected = list(
+      setup_files = df_records(graph$setup_master_candidates[graph$setup_master_candidates$role == "setup", , drop = FALSE]),
+      master_files = df_records(graph$setup_master_candidates[graph$setup_master_candidates$role == "master", , drop = FALSE]),
+      excluded_dirs = graph$excluded_dirs %||% character(0),
+      roots = roots
+    ),
+    nodes = df_records(nodes),
+    edges = df_records(edges),
+    issues = df_records(issues),
+    notes = df_records(notes)
+  )
+}
+
+write_structured_outputs <- function(graph, issues, parsed, data_info, project_path, out_dir,
+                                     project_name = NULL, roots = character(0)) {
+  notes <- attr(issues, "notes") %||% data.frame()
+  artifact <- graph_artifact(graph, issues, parsed, project_path, project_name, roots, notes)
+  json_path <- file.path(out_dir, "dependency_graph.json")
+  if (!requireNamespace("jsonlite", quietly = TRUE)) stop("jsonlite is required to write dependency_graph.json")
+  writeLines(jsonlite::toJSON(artifact, auto_unbox = TRUE, pretty = TRUE, na = "null"), json_path, useBytes = TRUE)
+
+  node_cols <- c("id", "label", "type", "path", "folder", "role", "included", "confidence")
+  edge_cols <- c("id", "from", "to", "type", "confidence", "provenance", "source_file", "line", "raw_path", "resolved_path", "certainty_notes")
+  issue_cols <- c("severity", "scope", "type", "path", "from", "to", "message", "confidence", "provenance")
+  write.csv(safe_table(graph$nodes, node_cols), file.path(out_dir, "nodes.csv"), row.names = FALSE, na = "")
+  write.csv(safe_table(graph$edges, edge_cols), file.path(out_dir, "edges.csv"), row.names = FALSE, na = "")
+  write.csv(safe_table(issues, issue_cols), file.path(out_dir, "issues.csv"), row.names = FALSE, na = "")
+  write_agent_context_v2(graph, issues, notes, parsed, project_path, out_dir, project_name, roots)
+  invisible(json_path)
+}
+
+write_agent_context_v2 <- function(graph, issues, notes, parsed, project_path, out_dir, project_name = NULL, roots = character(0)) {
+  out_path <- file.path(out_dir, "agent_context.md")
+  con <- file(out_path, open = "w", encoding = "UTF-8")
+  on.exit(close(con), add = TRUE)
+  wl <- function(x = "") writeLines(ascii_text(x), con)
+  if (is.null(project_name) || !nzchar(project_name)) project_name <- basename(project_path)
+
+  nodes <- graph$nodes
+  edges <- graph$edges
+  issue_cols <- c("severity", "scope", "type", "path", "from", "to", "message", "confidence", "provenance")
+  issues <- safe_table(issues, issue_cols)
+  notes <- safe_table(notes %||% data.frame(), issue_cols)
+  active_scripts <- nodes[nodes$type == "script" & nodes$role != "archived" & nodes$included, , drop = FALSE]
+  archived_scripts <- nodes[nodes$type == "script" & nodes$role == "archived", , drop = FALSE]
+  active_issues <- issues[issues$scope %in% c("active", "global"), , drop = FALSE]
+  archived_issues <- issues[issues$scope == "archived", , drop = FALSE]
+  low <- edges[edges$confidence == "low", , drop = FALSE]
+
+  wl(paste0("# Agent Handoff: ", project_name)); wl("")
+  wl("## Summary")
+  wl(paste0("- Active scripts: ", nrow(active_scripts)))
+  wl(paste0("- Archived scripts: ", nrow(archived_scripts)))
+  wl(paste0("- Data nodes: ", sum(nodes$type == "data")))
+  wl(paste0("- Edges: ", nrow(edges)))
+  wl(paste0("- Active issues: ", nrow(active_issues)))
+  wl(paste0("- Archived/stale issues: ", nrow(archived_issues)))
+  wl(paste0("- Low-confidence edges: ", nrow(low))); wl("")
+
+  cand <- graph$setup_master_candidates %||% data.frame()
+  if (nrow(cand) == 0) cand$archived <- logical(0)
+  if (!("archived" %in% names(cand))) cand$archived <- FALSE
+  active_cand <- cand[!cand$archived, , drop = FALSE]
+  archived_cand <- cand[cand$archived, , drop = FALSE]
+
+  wl("## Entry Points")
+  if (length(roots) > 0) {
+    for (r in head(roots, 10)) wl(paste0("- `", r, "`"))
+    if (length(roots) > 10) wl(paste0("- ... ", length(roots) - 10, " additional entry points omitted"))
+  } else wl("- None detected")
+  if (nrow(archived_cand) > 0) {
+    wl("")
+    wl("Archived master candidates:")
+    for (i in seq_len(min(nrow(archived_cand), 5L))) {
+      wl(paste0("- `", archived_cand$path[i], "`: ", archived_cand$confidence[i], " confidence: ", archived_cand$reason[i]))
+    }
+  }
+  wl("")
+
+  wl("## Setup / Path Variables")
+  if (nrow(active_cand) > 0) {
+    for (i in seq_len(min(nrow(active_cand), 10L))) {
+      wl(paste0("- `", active_cand$path[i], "`: ", active_cand$role[i], ", ", active_cand$confidence[i], " confidence: ", active_cand$reason[i]))
+    }
+    if (nrow(active_cand) > 10L) wl(paste0("- ... ", nrow(active_cand) - 10L, " additional candidates omitted"))
+  } else wl("- No active setup/master candidates detected")
+  vars <- parsed$setup_vars %||% character(0)
+  if (length(vars) > 0) {
+    nms <- unique(names(vars)[nzchar(names(vars))])
+    shown <- head(nms, 30)
+    for (nm in shown) {
+      vals <- vars[names(vars) == nm]
+      val <- vals[length(vals)]
+      if (nzchar(val)) wl(paste0("- `", nm, "` = `", val, "`"))
+    }
+    if (length(nms) > length(shown)) wl(paste0("- ... ", length(nms) - length(shown), " additional path variables omitted"))
+  }
+  wl("")
+
+  wl("## Active Dependency Shape")
+  ord <- try_topological_order(graph)
+  if (length(ord) > 0) {
+    shown <- head(ord, 30)
+    for (i in seq_along(shown)) wl(paste0(i, ". `", shown[i], "`"))
+    if (length(ord) > length(shown)) wl(paste0("- ... ", length(ord) - length(shown), " additional scripts omitted"))
+  } else wl("- No reliable high-confidence partial order could be computed")
+  wl(paste0("- High/medium-confidence source/run edges: ", nrow(edges[edges$type == "source_run" & edges$confidence != "low", , drop = FALSE])))
+  wl(paste0("- High/medium-confidence data-flow edges: ", nrow(edges[edges$type == "data_flow" & edges$confidence != "low", , drop = FALSE])))
+  wl("")
+
+  wl("## Uncertainty")
+  wl(paste0("- Low-confidence edge count: ", nrow(low)))
+  unresolved <- low[grepl("unresolved|\\$|\\{", paste(low$raw_path, low$certainty_notes), ignore.case = TRUE), , drop = FALSE]
+  if (nrow(unresolved) > 0) {
+    for (i in seq_len(min(nrow(unresolved), 10L))) wl(paste0("- unresolved: `", unresolved$raw_path[i], "` in `", unresolved$source_file[i] %||% unresolved$to[i], "`"))
+    if (nrow(unresolved) > 10L) wl(paste0("- ... ", nrow(unresolved) - 10L, " additional unresolved examples omitted"))
+  }
+  amb <- issues[issues$type %in% c("ambiguous_dataset_match", "duplicate_dataset_node"), , drop = FALSE]
+  if (nrow(amb) > 0) {
+    for (i in seq_len(min(nrow(amb), 10L))) wl(paste0("- ", amb$type[i], ": ", amb$message[i]))
+    if (nrow(amb) > 10L) wl(paste0("- ... ", nrow(amb) - 10L, " additional ambiguity examples omitted"))
+  }
+  wl("")
+
+  wl("## Active Issues")
+  if (nrow(active_issues) > 0) {
+    for (i in seq_len(min(nrow(active_issues), 30L))) wl(paste0("- [", active_issues$severity[i], "] ", active_issues$type[i], ": ", active_issues$message[i]))
+    if (nrow(active_issues) > 30L) wl(paste0("- ... ", nrow(active_issues) - 30L, " additional active/global issues omitted"))
+  } else wl("- None")
+  wl("")
+
+  wl("## Archived / Stale Code")
+  wl(paste0("- Archived scripts: ", nrow(archived_scripts)))
+  wl(paste0("- Archived/stale issue count: ", nrow(archived_issues)))
+  if (nrow(archived_issues) > 0) {
+    for (i in seq_len(min(nrow(archived_issues), 10L))) wl(paste0("- [", archived_issues$severity[i], "] ", archived_issues$type[i], ": ", archived_issues$message[i]))
+    if (nrow(archived_issues) > 10L) wl(paste0("- ... ", nrow(archived_issues) - 10L, " additional archived/stale issues omitted"))
+  }
+  wl("")
+
+  wl("## Files For Downstream Use")
+  wl("- dependency_graph.json")
+  wl("- nodes.csv")
+  wl("- edges.csv")
+  wl("- issues.csv")
+  invisible(out_path)
+}
+
+write_agent_context <- function(graph, issues, notes, parsed, project_path, out_dir, project_name = NULL, roots = character(0)) {
+  out_path <- file.path(out_dir, "agent_context.md")
+  con <- file(out_path, open = "w", encoding = "UTF-8")
+  on.exit(close(con), add = TRUE)
+  wl <- function(x = "") writeLines(x, con)
+  if (is.null(project_name) || !nzchar(project_name)) project_name <- basename(project_path)
+  nodes <- graph$nodes; edges <- graph$edges
+  wl(paste0("# Agent Handoff: ", project_name)); wl("")
+  wl("## Project summary")
+  wl(paste0("- Scripts: ", sum(nodes$type == "script")))
+  wl(paste0("- Dataset references: ", sum(nodes$type == "data")))
+  wl(paste0("- Edges: ", nrow(edges), " (low confidence: ", sum(edges$confidence == "low", na.rm = TRUE), ")"))
+  wl(paste0("- Actionable issues: ", nrow(issues))); wl("")
+
+  wl("## Detected setup/master files")
+  cand <- graph$setup_master_candidates %||% data.frame()
+  if (nrow(cand) > 0) for (i in seq_len(nrow(cand))) wl(paste0("- `", cand$path[i], "`: ", cand$role[i], ", ", cand$confidence[i], " confidence — ", cand$reason[i])) else wl("- None detected")
+  wl("")
+
+  wl("## Path variables")
+  vars <- parsed$setup_vars %||% character(0)
+  if (length(vars) > 0) {
+    nms <- unique(names(vars)[nzchar(names(vars))])
+    shown <- head(nms, 50)
+    for (nm in shown) {
+      vals <- vars[names(vars) == nm]
+      val <- vals[length(vals)]
+      if (nzchar(val)) wl(paste0("- `", nm, "` = `", val, "`"))
+    }
+    if (length(nms) > length(shown)) wl(paste0("- ... ", length(nms) - length(shown), " additional path variables omitted"))
+  } else wl("- None detected")
+  wl("")
+
+  wl("## Candidate entry points and active pipeline")
+  ord <- try_topological_order(graph)
+  if (length(roots) > 0) wl(paste0("- Candidate entry points: ", paste(paste0("`", roots, "`"), collapse = ", ")))
+  if (length(ord) > 0) {
+    shown <- head(ord, 30)
+    for (i in seq_along(shown)) wl(paste0(i, ". `", shown[i], "`"))
+    if (length(ord) > length(shown)) wl(paste0("- ... ", length(ord) - length(shown), " additional scripts omitted"))
+  } else wl("- No reliable high-confidence partial order could be computed")
+  wl("")
+
+  wl("## High-confidence dependency edges")
+  hi <- edges[edges$confidence == "high" & edges$type %in% c("source_run", "data_flow"), , drop = FALSE]
+  if (nrow(hi) > 0) {
+    for (i in seq_len(min(nrow(hi), 40L))) wl(paste0("- `", hi$from[i], "` -> `", hi$to[i], "` (", hi$type[i], "): ", hi$provenance[i]))
+    if (nrow(hi) > 40L) wl(paste0("- ... ", nrow(hi) - 40L, " additional high-confidence edges omitted"))
+  } else wl("- None")
+  wl("")
+
+  wl("## Low-confidence / uncertain areas")
+  low <- edges[edges$confidence == "low", , drop = FALSE]
+  if (nrow(low) > 0) for (i in seq_len(min(nrow(low), 30L))) wl(paste0("- `", low$from[i], "` -> `", low$to[i], "`: ", low$certainty_notes[i] %||% low$provenance[i])) else wl("- None")
+  wl("")
+
+  wl("## Actionable issues")
+  if (nrow(issues) > 0) for (i in seq_len(nrow(issues))) wl(paste0("- [", issues$severity[i], "] ", issues$type[i], ": ", issues$message[i])) else wl("- None")
+  wl("")
+
+  wl("## Informational notes")
+  if (!is.null(notes) && nrow(notes) > 0) for (i in seq_len(min(nrow(notes), 20L))) wl(paste0("- ", notes$type[i], ": ", notes$message[i])) else wl("- None")
+  wl("")
+
+  wl("## Suggested next checks")
+  wl("- Confirm the true master/setup entry point before executing scripts.")
+  wl("- Inspect low-confidence basename-only or unresolved-variable data-flow edges.")
+  wl("- Decide whether archived/old folders should remain excluded from the active graph.")
+  wl("- Use `dependency_graph.json`, `nodes.csv`, and `edges.csv` as the source of truth for downstream review.")
+  invisible(out_path)
 }
 
 # ---- Execution order ----
 build_execution_order_display <- function(graph, parsed, uu) {
   ord <- uu$ord; used <- uu$used; unused <- uu$unused
   if (length(ord) == 0) return('<p>Could not determine order (possible cycles).</p>')
-  r_edges <- graph$edges[graph$edges$type %in% c("sources", "data_flow"), ]
+  r_edges <- graph$edges[graph$edges$type %in% c("source_run", "sources", "data_flow") & graph$edges$confidence != "low", ]
   sort_edges <- r_edges
-  sort_edges[r_edges$type == "sources", c("from", "to")] <- r_edges[r_edges$type == "sources", c("to", "from")]
+  sort_edges[r_edges$type %in% c("source_run", "sources"), c("from", "to")] <- r_edges[r_edges$type %in% c("source_run", "sources"), c("to", "from")]
   preds_of <- split(sort_edges$from, sort_edges$to)
   used_ord <- ord[ord %in% used]
   levels <- setNames(rep(NA_integer_, length(used)), used)
@@ -194,7 +497,7 @@ generate_visualization <- function(graph, issues, parsed, data_info, project_pat
   write_path_setup_file(parsed, project_path, out_dir)
   if (nrow(graph$nodes) == 0) { message("No nodes to visualize."); return(invisible(NULL)) }
 
-  rev_src <- graph$edges$type == "sources"
+  rev_src <- graph$edges$type %in% c("source_run", "sources")
   flow_edges <- graph$edges
   flow_edges[rev_src, c("from","to")] <- graph$edges[rev_src, c("to","from")]
 
@@ -231,7 +534,7 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
 
   r_edges <- flow_edges[
     flow_edges$from %in% r_nodes & flow_edges$to %in% r_nodes &
-      flow_edges$type %in% c("sources", "data_flow"), ]
+      flow_edges$type %in% c("source_run", "sources", "data_flow"), ]
 
   data_nodes_all <- graph$nodes$id[graph$nodes$type == "data"]
   data_edges <- flow_edges[
@@ -259,6 +562,8 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
 
   get_folder <- function(x) { d <- gsub("\\\\", "/", dirname(x)); if (!nzchar(d) || d == ".") "root" else d }
   type_map <- setNames(graph$nodes$type, graph$nodes$id)
+  included_map <- if ("included" %in% names(graph$nodes)) setNames(graph$nodes$included, graph$nodes$id) else setNames(rep(TRUE, nrow(graph$nodes)), graph$nodes$id)
+  role_map <- if ("role" %in% names(graph$nodes)) setNames(graph$nodes$role, graph$nodes$id) else setNames(rep("unknown", nrow(graph$nodes)), graph$nodes$id)
 
   meta_patterns <- viz_options$meta_patterns %||% character(0)
   exclude_patterns <- viz_options$exclude_patterns %||% character(0)
@@ -286,7 +591,8 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
       is_missing_node <- !is.null(type_map[[rel]]) && identical(type_map[[rel]], "missing_script")
       is_root <- rel %in% roots
       is_meta <- meta_by_rule(rel)
-      is_excluded <- excluded_by_rule(rel)
+      is_archived <- identical(role_map[[rel]], "archived")
+      is_excluded <- excluded_by_rule(rel) || (!isTRUE(included_map[[rel]]) && !is_archived)
       list(
         id = id,
         kind = "script",
@@ -295,6 +601,9 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
         folder = get_folder(rel),
         root = is_root,
         meta = is_meta,
+        setup = is_setup_node || (!is.null(role_map[[rel]]) && identical(role_map[[rel]], "setup")),
+        role = role_map[[rel]] %||% "",
+        archived = is_archived,
         excluded = is_excluded,
         bg = if (is_setup_node) "#fef3c7" else if (is_missing_node) "#f1f5f9" else "#dbeafe",
         border = if (is_setup_node) "#d97706" else if (is_missing_node) "#64748b" else "#3b82f6"
@@ -317,7 +626,7 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
 
   edges <- list()
   edge_i <- 0L
-  add_edge <- function(from, to, kind, wrong = FALSE, reason = "") {
+  add_edge <- function(from, to, kind, wrong = FALSE, reason = "", confidence = "high") {
     fid <- id_map[[from]]
     tid <- id_map[[to]]
     if (is.na(fid) || !nzchar(fid) || is.na(tid) || !nzchar(tid)) return(invisible(NULL))
@@ -327,6 +636,7 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
       from = fid,
       to = tid,
       kind = kind,
+      confidence = if (is.na(confidence) || !nzchar(confidence)) "high" else as.character(confidence),
       wrong = isTRUE(wrong),
       reason = if (is.na(reason) || !nzchar(reason)) "" else as.character(reason)
     )
@@ -337,13 +647,15 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
     e <- r_edges[i, ]
     is_wrong <- paste(e$from, e$to, sep = "|") %in% wrong_pairs
     reason_str <- if (has_reason && !is.na(e$reason) && nzchar(e$reason)) e$reason else e$type
-    add_edge(e$from, e$to, e$type, is_wrong, reason_str)
+    conf_str <- if ("confidence" %in% names(r_edges) && !is.na(e$confidence) && nzchar(e$confidence)) e$confidence else "high"
+    add_edge(e$from, e$to, e$type, is_wrong, reason_str, conf_str)
   }
   has_reason_d <- "reason" %in% colnames(data_edges)
   for (i in seq_len(nrow(data_edges))) {
     e <- data_edges[i, ]
     reason_str <- if (has_reason_d && !is.na(e$reason) && nzchar(e$reason)) e$reason else e$type
-    add_edge(e$from, e$to, e$type, FALSE, reason_str)
+    conf_str <- if ("confidence" %in% names(data_edges) && !is.na(e$confidence) && nzchar(e$confidence)) e$confidence else "high"
+    add_edge(e$from, e$to, e$type, FALSE, reason_str, conf_str)
   }
   nodes_json <- jsonlite::toJSON(nodes, auto_unbox = TRUE)
   edges_json <- jsonlite::toJSON(edges, auto_unbox = TRUE)
@@ -363,6 +675,8 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
     var hideMeta = __HIDE_META__;
     var hideIndependent = __HIDE_INDEPENDENT__;
     var showDatasets = __SHOW_DATASETS__;
+    var showLowConfidence = __SHOW_LOW_CONFIDENCE__;
+    var showArchived = __SHOW_ARCHIVED__;
     var selectedId = null;
     var isFs = false;
     var hasRenderedOnce = false;
@@ -379,71 +693,53 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
        return true;
      }
      var scriptIds = new Set(nodes.filter(includedForDegree).map(function(n){ return n.id; }));
-     // "Independent" means: no other script depends on it (out-degree == 0)
-     // in the currently in-scope graph (respects hideMeta).
-     var outdeg = {};
-     nodes.forEach(function(n){ if (includedForDegree(n)) outdeg[n.id] = 0; });
+     // Independent means no incident script-to-script source/run or inferred
+     // data-flow edges after ignoring setup-only connections.
+     var degree = {};
+     nodes.forEach(function(n){ if (includedForDegree(n)) degree[n.id] = 0; });
+     var setupIds = new Set(nodes.filter(function(n){ return n && n.kind === \"script\" && (n.setup || n.role === \"setup\"); }).map(function(n){ return n.id; }));
      edges.forEach(function(e){
-       // Only count script-to-script edges that represent dependencies between scripts.
-       // Ignore reads/writes because those connect scripts to datasets.
-       if ((e.kind === \"sources\" || e.kind === \"data_flow\") && scriptIds.has(e.from) && scriptIds.has(e.to)) {
-         outdeg[e.from] = (outdeg[e.from] || 0) + 1;
+       if (!(e.kind === \"source_run\" || e.kind === \"sources\" || e.kind === \"data_flow\")) return;
+       if (setupIds.has(e.from) || setupIds.has(e.to)) return;
+       if (scriptIds.has(e.from)) {
+         degree[e.from] = (degree[e.from] || 0) + 1;
+       }
+       if (scriptIds.has(e.to)) {
+         degree[e.to] = (degree[e.to] || 0) + 1;
        }
      });
-     return outdeg;
+     return degree;
    }
 
    function isIndependentScript(n, degree) {
      if (!n || n.kind !== \"script\") return false;
      if (n.excluded) return false;
      if (n.root) return false;
+     if (n.setup || n.role === \"setup\") return false;
      if (hideMeta && n.meta) return false;
      return ((degree[n.id] || 0) === 0);
    }
 
    function computeIndependentHiddenSet(nodes, edges) {
-     // Hide "independent" scripts (out-degree == 0) relative to the current graph
-     // after applying meta/excluded filtering. To avoid peeling the *entire* DAG,
-     // we apply a small bounded cascade (2 rounds).
+     // Hide only genuinely independent scripts. Do not peel terminal consumers.
      var scripts = nodes.filter(function(n){
        if (!n || n.kind !== \"script\") return false;
        if (n.excluded) return false;
+       if (n.setup || n.role === \"setup\") return false;
        if (hideMeta && n.meta) return false;
        return true;
      });
-     var isRoot = {};
-     scripts.forEach(function(n){ isRoot[n.id] = !!n.root; });
-
      var removed = new Set();
-     var maxRounds = 2;
-
-     function buildOutdeg(active) {
-       var outdeg = {};
-       scripts.forEach(function(n){ if (active.has(n.id)) outdeg[n.id] = 0; });
-       edges.forEach(function(e){
-         if (!(e.kind === \"sources\" || e.kind === \"data_flow\")) return;
-         if (!active.has(e.from) || !active.has(e.to)) return;
-         outdeg[e.from] = (outdeg[e.from] || 0) + 1;
-       });
-       return outdeg;
-     }
-
-     for (var round = 0; round < maxRounds; round++) {
-       var active = new Set(scripts.map(function(n){ return n.id; }).filter(function(id){ return !removed.has(id); }));
-       if (active.size === 0) break;
-       var outdeg = buildOutdeg(active);
-       var newly = [];
-       active.forEach(function(id){
-         if (!isRoot[id] && (outdeg[id] || 0) === 0) newly.push(id);
-       });
-       if (newly.length === 0) break;
-       newly.forEach(function(id){ removed.add(id); });
-     }
+     var degree = computeScriptDegree(nodes, edges);
+     scripts.forEach(function(n){
+       if (!n.root && !(n.setup || n.role === \"setup\") && (degree[n.id] || 0) === 0) removed.add(n.id);
+     });
      return removed;
    }
 
    function isVisible(n, degree, indepHidden) {
      if (n && n.excluded) return false;
+     if (!showArchived && n && n.archived) return false;
      if (!showDatasets && n && n.kind === \"data\") return false;
      if (n && n.root) return true;
      if (hideMeta && n && n.meta) return false;
@@ -457,6 +753,7 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
      if (e.kind === \"reads\")  { color = \"#16a34a\"; dashes = [5,3]; }
      else if (e.kind === \"writes\") { color = \"#ea580c\"; dashes = [5,3]; }
      else if (e.kind === \"data_flow\") { color = \"#475569\"; dashes = false; }
+     if (e.confidence === \"low\") dashes = [2,4];
       return {color: color, dashes: dashes};
     }
 
@@ -465,7 +762,10 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
      var indepHidden = hideIndependent ? computeIndependentHiddenSet(allNodesData, allEdgesData) : null;
      var vn = allNodesData.filter(function(n){ return isVisible(n, degree, indepHidden); });
      var vi = new Set(vn.map(function(n){ return n.id; }));
-     var ve = allEdgesData.filter(function(e){ return vi.has(e.from) && vi.has(e.to); });
+     var ve = allEdgesData.filter(function(e){
+       if (!showLowConfidence && e.confidence === \"low\") return false;
+       return vi.has(e.from) && vi.has(e.to);
+     });
 
      var nodes = vn.map(function(n){
        return {
@@ -520,6 +820,11 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
      if (!btn) return;
      btn.textContent = showDatasets ? \"Hide datasets\" : \"Show datasets\";
    }
+   function updateArchivedButton() {
+     var btn = document.getElementById(\"archived-btn\");
+     if (!btn) return;
+     btn.textContent = showArchived ? \"Hide archived/excluded\" : \"Show archived/excluded\";
+   }
 
    window.toggleDatasets = function() {
      showDatasets = !showDatasets;
@@ -528,6 +833,11 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
        if (sel && sel.kind === \"data\") selectedId = null;
      }
      updateDatasetsButton();
+     rebuildGraph();
+   };
+   window.toggleArchived = function() {
+     showArchived = !showArchived;
+     updateArchivedButton();
      rebuildGraph();
    };
    window.toggleIndependentScripts = function() {
@@ -554,10 +864,13 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
      hideIndependent = false;
      hideMeta = false;
      showDatasets = false;
+     showLowConfidence = true;
+     showArchived = true;
      selectedId = null;
      updateIndependentButton();
      updateMetaButton();
      updateDatasetsButton();
+     updateArchivedButton();
      rebuildGraph();
    };
    // The SVG renderer will set up initial render later in this script.
@@ -776,7 +1089,10 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
     }
     var vn = allNodesData.filter(function(n){ return isVisible(n, degree, indepHidden); });
     var vi = new Set(vn.map(function(n){return n.id;}));
-    var ve = allEdgesData.filter(function(e){return vi.has(e.from) && vi.has(e.to);});
+    var ve = allEdgesData.filter(function(e){
+      if (!showLowConfidence && e.confidence === "low") return false;
+      return vi.has(e.from) && vi.has(e.to);
+    });
     // First render should always fit-to-view; subsequent renders preserve pan/zoom.
     renderSvg(vn, ve, hasRenderedOnce);
     hasRenderedOnce = true;
@@ -901,10 +1217,13 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
     hideIndependent = false;
     hideMeta = false;
     showDatasets = false;
+    showLowConfidence = true;
+    showArchived = true;
     selectedId = null;
     updateIndependentButton();
     updateMetaButton();
     updateDatasetsButton();
+    if (typeof updateArchivedButton === "function") updateArchivedButton();
     rebuildGraph();
   };
   window.resetGraphLayout = function() { fitGraph(); };
@@ -927,6 +1246,7 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
     updateIndependentButton();
     updateMetaButton();
     updateDatasetsButton();
+    if (typeof updateArchivedButton === "function") updateArchivedButton();
   } catch (err) {
     try { console.error(err); } catch (e) {}
     try {
@@ -945,6 +1265,8 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
   js_code <- gsub("__NODES__", nodes_json, js_template, fixed = TRUE)
   js_code <- gsub("__EDGES__", edges_json, js_code, fixed = TRUE)
   js_code <- gsub("__SHOW_DATASETS__", if (isTRUE(show_datasets_default)) "true" else "false", js_code, fixed = TRUE)
+  js_code <- gsub("__SHOW_LOW_CONFIDENCE__", if (isTRUE(viz_options$show_low_confidence_edges %||% TRUE)) "true" else "false", js_code, fixed = TRUE)
+  js_code <- gsub("__SHOW_ARCHIVED__", if (isTRUE(viz_options$show_archived %||% FALSE)) "true" else "false", js_code, fixed = TRUE)
   js_code <- gsub("__HIDE_META__", if (isTRUE(!show_meta_default)) "true" else "false", js_code, fixed = TRUE)
   js_code <- gsub("__HIDE_INDEPENDENT__", if (isTRUE(!show_indep_default)) "true" else "false", js_code, fixed = TRUE)
   js_code <- trimws(js_code)
@@ -953,6 +1275,7 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
   }
 
   datasets_btn_label <- if (isTRUE(show_datasets_default)) "Hide datasets" else "Show datasets"
+  archived_btn_label <- if (isTRUE(viz_options$show_archived %||% FALSE)) "Hide archived/excluded" else "Show archived/excluded"
   meta_btn_label <- if (isTRUE(show_meta_default)) "Hide meta files" else "Show meta files"
   indep_btn_label <- if (isTRUE(!show_indep_default)) "Show independent scripts" else "Hide independent scripts"
   paste0(
@@ -961,6 +1284,7 @@ build_svg_dependency_graph_div <- function(graph, issues, flow_edges, used, pars
     '<div class="graph-toolbar">',
       '<button id="fs-btn" class="btn-sm" onclick="toggleFullscreen()">Full screen</button>',
       '<button id="datasets-btn" class="btn-sm" onclick="toggleDatasets()">', datasets_btn_label, '</button>',
+      '<button id="archived-btn" class="btn-sm" onclick="toggleArchived()">', archived_btn_label, '</button>',
       '<button id="meta-btn" class="btn-sm" onclick="toggleMetaFiles()">', meta_btn_label, '</button>',
       '<button id="indep-btn" class="btn-sm" onclick="toggleIndependentScripts()">', indep_btn_label, '</button>',
       '<button class="btn-sm" onclick="showAllScripts()">Reset view</button>',
@@ -1246,39 +1570,96 @@ build_dataset_index <- function(data_info, parsed) {
 
 # ---- Issues ----
 format_issue_message <- function(iss) {
-  if (iss$type == "dataset_not_used")
-    sprintf('<span class="iss-ds">%s</span> created by <span class="iss-sc">%s</span> &mdash; never read', html_esc(iss$to), html_esc(basename(iss$from)))
-  else if (iss$type == "file_not_used")
-    sprintf('<span class="iss-sc">%s</span> &mdash; not in execution chain', html_esc(iss$from))
-  else html_esc(iss$message)
+  msg <- html_esc(iss$message)
+  prov <- if ("provenance" %in% names(iss) && nzchar(iss$provenance %||% "")) paste0(' <span class="dim">(', html_esc(iss$provenance), ')</span>') else ""
+  paste0(msg, prov)
 }
 
 build_issues_section <- function(issues) {
-  if (nrow(issues) == 0) return('<h2 id="issues">Issues</h2><p class="ok">No issues detected.</p>')
-  n_err  <- sum(issues$severity == "error")
-  n_info <- sum(issues$severity == "info")
+  if (nrow(issues) == 0) return('<h2 id="issues">Actionable Issues</h2><p class="ok">No actionable issues detected.</p>')
+  if (!("scope" %in% names(issues))) issues$scope <- "active"
+  active_issues <- issues[issues$scope %in% c("active", "global"), , drop = FALSE]
+  archived_issues <- issues[issues$scope == "archived", , drop = FALSE]
+  n_err  <- sum(active_issues$severity == "error")
+  n_warn <- sum(active_issues$severity == "warning")
   type_labels <- c(
-    wrong_dependency    = "Wrong dependencies",
-    missing_source      = "Missing source files",
-    circular_dependency = "Circular dependencies",
-    file_not_used       = "Files not in execution chain",
-    dataset_not_used    = "Datasets created but never read"
+    missing_source = "Missing source/run/include target",
+    cycle = "Dependency cycles",
+    unresolved_path_variable = "Unresolved path variables",
+    ambiguous_dataset_match = "Ambiguous dataset matches",
+    excluded_but_referenced = "Archived/excluded files referenced",
+    duplicate_dataset_node = "Likely duplicate dataset nodes"
   )
-  by_type    <- split(seq_len(nrow(issues)), issues$type)
-  type_order <- c("wrong_dependency","missing_source","circular_dependency","file_not_used","dataset_not_used")
-  out <- '<h2 id="issues">Issues</h2>'
+  type_order <- c("missing_source","cycle","unresolved_path_variable","ambiguous_dataset_match","excluded_but_referenced","duplicate_dataset_node")
+  out <- '<h2 id="issues">Actionable Issues</h2>'
   if (n_err  > 0) out <- paste0(out, sprintf('<p class="iss-sum err">%d error%s &mdash; review before running</p>', n_err,  if (n_err  != 1) "s" else ""))
-  if (n_info > 0) out <- paste0(out, sprintf('<p class="iss-sum info">%d info note%s</p>',                   n_info, if (n_info != 1) "s" else ""))
+  if (n_warn > 0) out <- paste0(out, sprintf('<p class="iss-sum info">%d warning%s</p>', n_warn, if (n_warn != 1) "s" else ""))
+  if (nrow(active_issues) == 0) out <- paste0(out, '<p class="ok">No active/global issues detected.</p>')
+  by_type <- split(seq_len(nrow(active_issues)), active_issues$type)
   for (t in c(intersect(type_order, names(by_type)), setdiff(names(by_type), type_order))) {
     idx <- by_type[[t]]; n <- length(idx)
     label <- if (!is.na(type_labels[t]) && nzchar(type_labels[t])) type_labels[t] else t
-    is_err <- issues$severity[idx[1]] == "error"
+    is_err <- active_issues$severity[idx[1]] == "error"
     cls    <- if (is_err) "iss-group err" else "iss-group info"
     out <- paste0(out, sprintf('<details class="%s"><summary>%s (%d)</summary><ul>', cls, html_esc(label), n))
-    for (i in idx) out <- paste0(out, sprintf('<li>%s</li>', format_issue_message(issues[i, ])))
+    for (i in idx) out <- paste0(out, sprintf('<li>%s</li>', format_issue_message(active_issues[i, ])))
+    out <- paste0(out, '</ul></details>')
+  }
+  if (nrow(archived_issues) > 0) {
+    out <- paste0(out, sprintf('<details class="iss-group info"><summary>Archived/stale issues (%d)</summary><ul>', nrow(archived_issues)))
+    for (i in seq_len(min(nrow(archived_issues), 50L))) out <- paste0(out, sprintf('<li>%s</li>', format_issue_message(archived_issues[i, ])))
+    if (nrow(archived_issues) > 50L) out <- paste0(out, sprintf('<li class="dim">%d additional archived/stale issues omitted from HTML.</li>', nrow(archived_issues) - 50L))
     out <- paste0(out, '</ul></details>')
   }
   out
+}
+
+build_agent_handoff_html <- function(graph, issues, roots = character(0)) {
+  cand <- graph$setup_master_candidates %||% data.frame()
+  low_n <- sum(graph$edges$confidence == "low", na.rm = TRUE)
+  root_html <- if (length(roots) > 0) paste(paste0("<code>", html_esc(roots), "</code>"), collapse = ", ") else "<span class='dim'>none detected</span>"
+  cand_html <- if (nrow(cand) > 0) {
+    paste(vapply(seq_len(min(nrow(cand), 8L)), function(i) {
+      sprintf("<li><code>%s</code> — %s, %s confidence</li>", html_esc(cand$path[i]), html_esc(cand$role[i]), html_esc(cand$confidence[i]))
+    }, character(1)), collapse = "")
+  } else "<li class='dim'>No setup/master candidates detected</li>"
+  issue_html <- if (nrow(issues) > 0) {
+    paste(vapply(seq_len(min(nrow(issues), 8L)), function(i) {
+      sprintf("<li>[%s] %s</li>", html_esc(issues$severity[i]), html_esc(issues$message[i]))
+    }, character(1)), collapse = "")
+  } else "<li class='ok'>No actionable issues detected</li>"
+  paste0(
+    "<h2>Agent Handoff Summary</h2>",
+    "<p class='viz-desc'>Use <code>dependency_graph.json</code>, <code>nodes.csv</code>, and <code>edges.csv</code> as the source of truth. The full handoff is in <code>agent_context.md</code>.</p>",
+    "<h3>Candidate entry points</h3><p class='viz-desc'>These are scripts with no detected upstream script dependency, or detected master/orchestrator files. They are hypotheses, not proof of the true runnable entry point.</p><p>", root_html, "</p>",
+    "<h3>Setup/master candidates</h3><ul>", cand_html, "</ul>",
+    "<h3>Uncertainty</h3><p>", low_n, " low-confidence edge", if (low_n != 1) "s" else "", ". Confirm basename-only matches and unresolved path variables before relying on execution order.</p>",
+    "<h3>Top actionable issues</h3><ul>", issue_html, "</ul>"
+  )
+}
+
+build_detected_section <- function(graph, parsed) {
+  cand <- graph$setup_master_candidates %||% data.frame()
+  vars <- parsed$setup_vars %||% character(0)
+  excluded <- graph$excluded_dirs %||% character(0)
+  excluded_nodes <- graph$nodes[graph$nodes$role == "archived", , drop = FALSE]
+  referenced <- excluded_nodes[excluded_nodes$included, , drop = FALSE]
+  cand_rows <- if (nrow(cand) > 0) paste(vapply(seq_len(nrow(cand)), function(i) {
+    sprintf("<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td></tr>", html_esc(cand$path[i]), html_esc(cand$role[i]), html_esc(cand$confidence[i]), html_esc(cand$reason[i]))
+  }, character(1)), collapse = "") else "<tr><td colspan='4' class='dim'>None detected</td></tr>"
+  var_names <- unique(names(vars)[nzchar(names(vars))])
+  var_rows <- if (length(var_names) > 0) paste(vapply(head(var_names, 80), function(nm) {
+    vals <- vars[names(vars) == nm]
+    sprintf("<tr><td><code>%s</code></td><td><code>%s</code></td></tr>", html_esc(nm), html_esc(vals[length(vals)]))
+  }, character(1)), collapse = "") else "<tr><td colspan='2' class='dim'>None detected</td></tr>"
+  if (length(var_names) > 80) var_rows <- paste0(var_rows, "<tr><td colspan='2' class='dim'>", length(var_names) - 80, " additional variables omitted</td></tr>")
+  paste0(
+    "<h2>Detected Setup, Master, And Paths</h2>",
+    "<h3>Setup/master candidates</h3><table><tr><th>Path</th><th>Role</th><th>Confidence</th><th>Reason</th></tr>", cand_rows, "</table>",
+    "<h3>Path variables/globals</h3><table><tr><th>Name</th><th>Resolved value</th></tr>", var_rows, "</table>",
+    "<h3>Excluded folders</h3><p>", if (length(excluded) > 0) html_esc(paste(excluded, collapse = ", ")) else "<span class='dim'>none configured</span>",
+    ". Archived/excluded scripts found: ", nrow(excluded_nodes), "; referenced by active graph: ", nrow(referenced), ".</p>"
+  )
 }
 
 # ---- Folder filter panel ----
@@ -1355,16 +1736,21 @@ build_full_html <- function(parsed, data_info, graph, issues, uu, exec_display, 
                              setup_file = NULL,
                              roots = character(0)) {
   if (is.null(project_name) || !nzchar(project_name)) project_name <- "Project"
-  n_r     <- sum(graph$nodes$type == "r_file")
+  n_active <- sum(graph$nodes$type == "script" & graph$nodes$role != "archived" & graph$nodes$included)
+  n_archived <- sum(graph$nodes$type == "script" & graph$nodes$role == "archived")
   n_d     <- sum(graph$nodes$type == "data")
   n_edges <- nrow(graph$edges)
-  n_err   <- sum(issues$severity == "error")
-  n_note  <- sum(issues$severity == "info")
+  if (!("scope" %in% names(issues))) issues$scope <- "active"
+  n_active_issues <- sum(issues$scope %in% c("active", "global"))
+  n_archived_issues <- sum(issues$scope == "archived")
+  n_err   <- sum(issues$severity == "error" & issues$scope %in% c("active", "global"))
 
   r_index    <- build_r_file_index(parsed, graph, setup_file, project_path)
   show_dataset_index <- !is.null(data_info$data_scan)
   data_index <- if (isTRUE(show_dataset_index)) build_dataset_index(data_info, parsed) else ""
   issues_html <- build_issues_section(issues)
+  handoff_html <- build_agent_handoff_html(graph, issues, roots)
+  detected_html <- build_detected_section(graph, parsed)
 
   # Data existence note (the tool never opens/reads data files)
   data_path_note <- ""
@@ -1387,13 +1773,17 @@ build_full_html <- function(parsed, data_info, graph, issues, uu, exec_display, 
   overview <- sprintf(
     paste0(
       '<div class="overview-grid">',
-      '<div class="stat"><span class="num">%d</span><span class="lbl">Scripts</span></div>',
+      '<div class="stat"><span class="num">%d</span><span class="lbl">Active scripts</span></div>',
+      '<div class="stat"><span class="num">%d</span><span class="lbl">Archived scripts</span></div>',
       '<div class="stat"><span class="num">%d</span><span class="lbl">Datasets ref.</span></div>',
-      '<div class="stat %s"><span class="num">%d</span><span class="lbl">Errors</span></div>',
-      '<div class="stat"><span class="num">%d</span><span class="lbl">Notes</span></div>',
+      '<div class="stat %s"><span class="num">%d</span><span class="lbl">Active issues</span></div>',
+      '<div class="stat"><span class="num">%d</span><span class="lbl">Archived issues</span></div>',
+      '<div class="stat"><span class="num">%d</span><span class="lbl">Edges</span></div>',
+      '<div class="stat"><span class="num">%d</span><span class="lbl">Low-conf edges</span></div>',
       '</div>%s%s'
     ),
-    n_r, n_d, if (n_err > 0) "err" else "", n_err, n_note, data_path_note, roots_note)
+    n_active, n_archived, n_d, if (n_err > 0) "err" else "", n_active_issues, n_archived_issues, n_edges,
+    sum(graph$edges$confidence == "low", na.rm = TRUE), data_path_note, roots_note)
 
   css <- '
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1495,9 +1885,6 @@ details summary::-webkit-details-marker{color:#94a3b8}
     )
   } else ""
 
-  # Debug section: edge counts by type and full edge table with provenance
-  debug_html <- build_debug_section(graph)
-
   sprintf('<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1511,11 +1898,12 @@ details summary::-webkit-details-marker{color:#94a3b8}
   <span class="title">%s</span>
   <a href="#overview-card">Overview</a>
   <a href="#graph">Graph</a>
-  <a href="#execution">Execution</a>
-  <a href="#files">Files</a>
-%s
+  <a href="#handoff">Handoff</a>
   <a href="#issues">Issues</a>
-  <a href="#debug">Debug</a>
+  <a href="#detected">Detected</a>
+  <a href="#execution">Order</a>
+%s
+  <a href="#details">Details</a>
 </nav>
 <main>
   <div class="card" id="overview-card">
@@ -1527,20 +1915,24 @@ details summary::-webkit-details-marker{color:#94a3b8}
 <p class="viz-desc">Interactive: scroll to zoom, drag to pan. Arrows = data/execution flow (provider &rarr; consumer). Click a node to see edge provenance.</p>
     %s
   </div>
-  <div class="card" id="execution">
-    <h2>Execution Order</h2>
+  <div class="card" id="handoff">
     %s
   </div>
-  <div class="card" id="files">
-    %s
-  </div>
-%s
   <div class="card" id="issues">
     %s
   </div>
-  <div class="card" id="debug">
+  <div class="card" id="detected">
     %s
   </div>
+  <div class="card" id="execution">
+    <h2>Likely Partial Order</h2>
+    <p class="viz-desc">High-confidence order only. Order is incomplete when dependencies are unresolved or low confidence.</p>
+    %s
+  </div>
+  <div class="card" id="details">
+    <details><summary><h2 style="display:inline">Full Script Index</h2></summary>%s</details>
+  </div>
+%s
 </main>
 </body>
 </html>',
@@ -1549,11 +1941,12 @@ details summary::-webkit-details-marker{color:#94a3b8}
     datasets_nav,
     html_esc(project_name), overview,
     viz_html,
+    handoff_html,
+    issues_html,
+    detected_html,
     exec_display,
     r_index,
-    datasets_card,
-    issues_html,
-    debug_html
+    datasets_card
   )
 }
 
@@ -1571,25 +1964,26 @@ build_debug_section <- function(graph) {
   )
 
   # Full edge table (capped at 500 rows to avoid huge HTML)
-  has_reason <- "reason" %in% colnames(edges)
+  has_reason <- "provenance" %in% colnames(edges)
   max_rows <- min(nrow(edges), 500L)
   edge_rows <- character(0)
   if (nrow(edges) > 0) {
     for (i in seq_len(max_rows)) {
       e <- edges[i, ]
-      reason_str <- if (has_reason && !is.na(e$reason) && nzchar(e$reason)) e$reason else ""
+      reason_str <- if (has_reason && !is.na(e$provenance) && nzchar(e$provenance)) e$provenance else ""
       edge_rows <- c(edge_rows, sprintf(
-        '<tr><td title="%s">%s</td><td title="%s">%s</td><td>%s</td><td style="color:#64748b;font-size:11px">%s</td></tr>',
+        '<tr><td title="%s">%s</td><td title="%s">%s</td><td>%s</td><td>%s</td><td style="color:#64748b;font-size:11px">%s</td></tr>',
         html_esc(e$from), html_esc(basename(e$from)),
         html_esc(e$to), html_esc(basename(e$to)),
         html_esc(e$type),
+        html_esc(e$confidence %||% ""),
         html_esc(reason_str)
       ))
     }
   }
   trunc_note <- if (nrow(edges) > 500L) sprintf('<p style="color:#64748b;font-size:12px">Showing first 500 of %d edges.</p>', nrow(edges)) else ""
   edge_table_html <- paste0(
-    '<table><tr><th>From</th><th>To</th><th>Type</th><th>Reason / Provenance</th></tr>',
+    '<table><tr><th>From</th><th>To</th><th>Type</th><th>Confidence</th><th>Provenance</th></tr>',
     paste(edge_rows, collapse = ""),
     '</table>', trunc_note
   )

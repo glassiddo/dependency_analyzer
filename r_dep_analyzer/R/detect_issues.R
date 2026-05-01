@@ -1,140 +1,176 @@
-# Detect issues: circular deps, missing files, wrong deps, unused files/datasets, etc.
+# Detect actionable issues and lower-priority notes from the normalized graph.
 
 detect_issues <- function(graph, parsed, data_info, project_path) {
   project_path <- normalizePath(project_path, mustWork = TRUE)
+  issue_cols <- c("severity", "scope", "type", "path", "from", "to", "message", "confidence", "provenance")
   issues <- data.frame(
-    type = character(0), severity = character(0), from = character(0),
-    to = character(0), message = character(0), stringsAsFactors = FALSE
+    severity = character(0), scope = character(0), type = character(0), path = character(0),
+    from = character(0), to = character(0), message = character(0),
+    confidence = character(0), provenance = character(0),
+    stringsAsFactors = FALSE
   )
-  
-  r_nodes <- graph$nodes$id[graph$nodes$type == "r_file"]
-  
-  # 1. Missing source files (with case-insensitive fallback for cross-OS portability)
-  for (rel in names(parsed$files)) {
-    f <- parsed$files[[rel]]
-    for (s in f$sources) {
-      full <- file.path(project_path, s)
-      if (!file.exists(full)) {
-        # On case-sensitive filesystems, resolved path may differ by case; try same dir + same basename
-        found_alt <- FALSE
-        if (dir.exists(dirname(full))) {
-          b <- basename(s)
-          existing <- list.files(dirname(full), ignore.case = FALSE)
-          if (any(tolower(existing) == tolower(b))) found_alt <- TRUE
-        }
-        if (!found_alt) {
-          issues <- rbind(issues, data.frame(
-            type = "missing_source",
-            severity = "error",
-            from = rel,
-            to = s,
-            message = paste0("R file '", rel, "' sources '", s, "' which does not exist"),
-            stringsAsFactors = FALSE
-          ))
-        }
-      }
+  notes <- issues
+
+  add_issue <- function(severity, scope, type, path = "", from = "", to = "", message = "",
+                        confidence = "", provenance = "") {
+    row <- data.frame(
+      severity = severity, scope = scope, type = type, path = path, from = from, to = to,
+      message = message, confidence = confidence, provenance = provenance,
+      stringsAsFactors = FALSE
+    )
+    issues <<- rbind(issues, row)
+  }
+  add_note <- function(type, scope = "global", path = "", from = "", to = "", message = "",
+                       confidence = "", provenance = "") {
+    row <- data.frame(
+      severity = "info", scope = scope, type = type, path = path, from = from, to = to,
+      message = message, confidence = confidence, provenance = provenance,
+      stringsAsFactors = FALSE
+    )
+    notes <<- rbind(notes, row)
+  }
+
+  script_nodes <- graph$nodes$id[graph$nodes$type == "script"]
+  included <- if ("included" %in% names(graph$nodes)) graph$nodes$included else rep(TRUE, nrow(graph$nodes))
+  role_map <- if ("role" %in% names(graph$nodes)) setNames(graph$nodes$role, graph$nodes$id) else character(0)
+  archived_scripts <- names(role_map)[role_map == "archived"]
+  active_scripts <- graph$nodes$id[graph$nodes$type == "script" & included & !(graph$nodes$id %in% archived_scripts)]
+  edge_scope <- function(e) {
+    ids <- unique(c(as.character(e$source_file %||% ""), as.character(e$from %||% ""), as.character(e$to %||% "")))
+    ids <- ids[!is.na(ids) & nzchar(ids)]
+    if (length(ids) > 0 && any(ids %in% archived_scripts)) "archived" else "active"
+  }
+
+  src_edges <- graph$edges[graph$edges$type %in% c("source_run", "sources"), , drop = FALSE]
+  missing <- src_edges[!(src_edges$to %in% script_nodes), , drop = FALSE]
+  if (nrow(missing) > 0) {
+    for (i in seq_len(nrow(missing))) {
+      e <- missing[i, ]
+      scope <- edge_scope(e)
+      add_issue(
+        if (scope == "archived") "info" else "error",
+        scope, "missing_source", path = e$source_file %||% e$from,
+        from = e$from, to = e$to,
+        message = paste0("Explicit source/run/include target could not be found: ", e$to),
+        confidence = e$confidence %||% "high", provenance = e$provenance %||% ""
+      )
     }
   }
-  
-  # 2. Missing data files - skipped (user may not have data in folder)
-  
-  # 3. Wrong dependencies: A sources B but pipeline/data-flow says B runs after A
-  src_edges <- graph$edges[graph$edges$type == "sources" & graph$edges$from %in% r_nodes & graph$edges$to %in% r_nodes, ]
-  ord_edges <- graph$edges[graph$edges$type %in% c("pipeline", "data_flow") & graph$edges$from %in% r_nodes & graph$edges$to %in% r_nodes, ]
-  for (i in seq_len(nrow(src_edges))) {
-    caller <- src_edges$from[i]
-    callee <- src_edges$to[i]
-    if (nrow(ord_edges) > 0) {
-      rev_path <- any(ord_edges$from == callee & ord_edges$to == caller)
-      if (rev_path) {
-        issues <- rbind(issues, data.frame(
-          type = "wrong_dependency",
-          severity = "error",
-          from = caller,
-          to = callee,
-          message = paste0("'", caller, "' sources '", callee, "' but execution order requires ", callee, " to run first (wrong order)"),
-          stringsAsFactors = FALSE
-        ))
-      }
-    }
-  }
-  
-  # 4. Circular dependencies (R files only)
-  r_edges <- graph$edges[graph$edges$type == "sources" & graph$edges$from %in% r_nodes & graph$edges$to %in% r_nodes, ]
-  if (nrow(r_edges) > 0) {
+
+  active_src <- src_edges[src_edges$from %in% active_scripts & src_edges$to %in% active_scripts, , drop = FALSE]
+  if (nrow(active_src) > 0) {
     if (requireNamespace("igraph", quietly = TRUE)) {
-      g <- igraph::graph_from_data_frame(r_edges[, c("from", "to")], vertices = r_nodes)
-      cyc <- tryCatch(igraph::girth(g), error = function(e) list(girth = Inf, circle = NULL))
-      if (!is.null(cyc) && is.finite(cyc$girth) && cyc$girth > 0 && !is.null(cyc$circle) && length(cyc$circle) > 0) {
-        cycle_nodes <- as.character(igraph::V(g)$name[cyc$circle])
-        issues <- rbind(issues, data.frame(
-          type = "circular_dependency",
-          severity = "error",
-          from = paste(cycle_nodes, collapse = " -> "),
-          to = "",
-          message = paste0("Circular dependency among R files: ", paste(cycle_nodes, collapse = " -> ")),
-          stringsAsFactors = FALSE
-        ))
+      g <- igraph::graph_from_data_frame(active_src[, c("from", "to")], vertices = active_scripts)
+      comps <- igraph::components(g, mode = "strong")
+      cyc_ids <- names(comps$membership)[comps$csize[comps$membership] > 1]
+      if (length(cyc_ids) > 0) {
+        add_issue(
+          "error", "active", "cycle", from = paste(cyc_ids, collapse = " -> "),
+          message = paste0("Script-to-script dependency cycle among active scripts: ", paste(cyc_ids, collapse = " -> ")),
+          confidence = "high", provenance = "source_run graph"
+        )
       }
     } else {
-      cycles <- simple_cycle_check(r_edges)
-      if (length(cycles) > 0) {
-        for (cyc in cycles) {
-          issues <- rbind(issues, data.frame(
-            type = "circular_dependency",
-            severity = "error",
-            from = paste(cyc, collapse = " -> "),
-            to = "",
-            message = paste0("Circular dependency: ", paste(cyc, collapse = " -> ")),
-            stringsAsFactors = FALSE
-          ))
-        }
+      cycles <- simple_cycle_check(active_src)
+      for (cyc in cycles) {
+        add_issue(
+          "error", "active", "cycle", from = paste(cyc, collapse = " -> "),
+          message = paste0("Script-to-script dependency cycle among active scripts: ", paste(cyc, collapse = " -> ")),
+          confidence = "high", provenance = "source_run graph"
+        )
       }
     }
   }
-  
-  # 5. Files not used (never sourced by others, no pipeline/data consumer)
-  has_incoming <- unique(graph$edges$to[graph$edges$type %in% c("sources", "pipeline", "data_flow")])
-  has_outgoing_data <- unique(graph$edges$from[graph$edges$type == "data_flow"])
-  setup_file <- graph$setup_file
-  unused_files <- setdiff(r_nodes, has_incoming)
-  unused_files <- setdiff(unused_files, has_outgoing_data)
-  unused_files <- setdiff(unused_files, setup_file)
-  if (length(unused_files) > 0) {
-    for (o in unused_files) {
-      issues <- rbind(issues, data.frame(
-        type = "file_not_used",
-        severity = "info",
-        from = o,
-        to = "",
-        message = paste0("'", o, "' — not used"),
-        stringsAsFactors = FALSE
-      ))
+
+  unresolved <- graph$edges[graph$edges$confidence == "low" &
+                              grepl("unresolved path variable|unresolved|\\$|\\{", paste(graph$edges$raw_path, graph$edges$certainty_notes), ignore.case = TRUE),
+                            , drop = FALSE]
+  if (nrow(unresolved) > 0) {
+    for (i in seq_len(nrow(unresolved))) {
+      e <- unresolved[i, ]
+      scope <- edge_scope(e)
+      add_issue(
+        if (scope == "archived") "info" else "warning",
+        scope, "unresolved_path_variable", path = e$source_file %||% "",
+        from = e$from, to = e$to,
+        message = paste0("Path expression could not be fully resolved: ", e$raw_path),
+        confidence = e$confidence, provenance = e$provenance
+      )
     }
   }
-  
-  # 6. Datasets created but never read
-  all_written <- unique(unlist(lapply(parsed$files, function(f) f$data_writes %||% character(0))))
-  all_read <- unique(unlist(lapply(parsed$files, function(f) f$data_reads %||% character(0))))
-  norm <- function(p) gsub("\\\\", "/", tolower(trimws(normalize_path_canonical(p))))
-  written_norm <- norm(all_written)
-  read_norm <- norm(all_read)
-  unused_data <- all_written[!written_norm %in% read_norm]
-  if (length(unused_data) > 0) {
-    for (d in unused_data) {
-      producer <- names(parsed$files)[vapply(parsed$files, function(f) d %in% (f$data_writes %||% character(0)), logical(1))]
-      producer <- producer[1]
-      issues <- rbind(issues, data.frame(
-        type = "dataset_not_used",
-        severity = "info",
-        from = producer,
-        to = d,
-        message = paste0("'", d, "' created by '", producer, "' — never read"),
-        stringsAsFactors = FALSE
-      ))
+
+  ambiguous <- graph$edges[graph$edges$type == "data_flow" & graph$edges$confidence == "low", , drop = FALSE]
+  if (nrow(ambiguous) > 0) {
+    for (i in seq_len(nrow(ambiguous))) {
+      e <- ambiguous[i, ]
+      scope <- if (e$from %in% active_scripts && e$to %in% active_scripts) "active" else if (e$from %in% archived_scripts || e$to %in% archived_scripts) "archived" else "global"
+      add_issue(
+        if (scope == "archived") "info" else "warning",
+        scope, "ambiguous_dataset_match", from = e$from, to = e$to,
+        message = paste0("Data-flow edge is low confidence: ", e$certainty_notes),
+        confidence = "low", provenance = e$provenance
+      )
     }
   }
-  
+
+  archived_refs <- src_edges[src_edges$from %in% active_scripts & src_edges$to %in% names(role_map)[role_map == "archived"], , drop = FALSE]
+  if (nrow(archived_refs) > 0) {
+    for (i in seq_len(nrow(archived_refs))) {
+      e <- archived_refs[i, ]
+      add_issue(
+        "warning", "active", "excluded_but_referenced", path = e$source_file %||% e$from,
+        from = e$from, to = e$to,
+        message = paste0("Active code references archived/excluded script: ", e$to),
+        confidence = e$confidence, provenance = e$provenance
+      )
+    }
+  }
+
+  data_nodes <- graph$nodes[graph$nodes$type == "data", , drop = FALSE]
+  if (nrow(data_nodes) > 0) {
+    key <- tolower(basename(data_nodes$id))
+    dups <- unique(key[duplicated(key)])
+    dup_issue_msgs <- character(0)
+    dup_issue_paths <- character(0)
+    for (k in dups[nzchar(dups)]) {
+      paths <- data_nodes$id[key == k]
+      has_bare <- any(!grepl("/", paths, fixed = TRUE))
+      has_full <- any(grepl("/", paths, fixed = TRUE))
+      if (has_bare && has_full) {
+        dup_issue_msgs <- c(dup_issue_msgs, paste0(k, " (", paste(paths, collapse = "; "), ")"))
+        dup_issue_paths <- c(dup_issue_paths, paste(paths, collapse = "; "))
+      } else {
+        add_note(
+          "duplicate_dataset_basename", scope = "global", path = paste(paths, collapse = "; "),
+          message = paste0("Multiple dataset references share basename '", k, "' across paths."),
+          confidence = "low", provenance = "basename duplicate scan"
+        )
+      }
+    }
+    if (length(dup_issue_msgs) > 0) {
+      sample_msg <- paste(head(dup_issue_msgs, 10), collapse = " | ")
+      if (length(dup_issue_msgs) > 10) sample_msg <- paste0(sample_msg, " | ... ", length(dup_issue_msgs) - 10, " more")
+      add_issue(
+        "warning", "global", "duplicate_dataset_node",
+        path = paste(head(dup_issue_paths, 20), collapse = " || "),
+        message = paste0(length(dup_issue_msgs), " dataset basenames appear as both bare names and full paths. Examples: ", sample_msg),
+        confidence = "low", provenance = "basename/full-path duplicate scan"
+      )
+    }
+  }
+
+  written <- unique(graph$edges$to[graph$edges$type == "writes"])
+  read <- unique(graph$edges$from[graph$edges$type == "reads"])
+  for (d in setdiff(written, read)) {
+    add_note("dataset_written_not_read", scope = "global", path = d, to = d, message = paste0("Dataset is written but no matching read was detected: ", d), confidence = "medium")
+  }
+  for (d in setdiff(read, written)) {
+    add_note("dataset_read_not_produced", scope = "global", path = d, from = d, message = paste0("Dataset is read but no matching writer was detected: ", d), confidence = "medium")
+  }
+
+  issues <- issues[, issue_cols, drop = FALSE]
+  notes <- notes[, issue_cols, drop = FALSE]
+  attr(issues, "notes") <- notes
   issues
 }
 
@@ -146,11 +182,8 @@ simple_cycle_check <- function(edges) {
   cycles <- list()
   for (start in nodes) {
     found <- find_cycle_dfs(start, start, adj, character(0), character(0))
-    if (length(found) > 0) {
-      cycles <- c(cycles, list(found))
-    }
+    if (length(found) > 0) cycles <- c(cycles, list(found))
   }
-  # Dedupe by sorted node set
   if (length(cycles) == 0) return(list())
   keys <- vapply(cycles, function(x) paste(sort(x), collapse = "|"), character(1))
   cycles[!duplicated(keys)]

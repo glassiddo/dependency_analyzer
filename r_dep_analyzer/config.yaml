@@ -11,8 +11,15 @@ output:
   dir_name: _dependency_analysis
   master_file: master_summary.md
   viz_file: dependency_graph.html
+setup_files: []
+master_files: []
+exclude_dirs: [Archive, archive, archives, old, Old, backup, Backup]
+include_dirs: []
+roots: []
 graph:
   roots: []
+  show_archived: false
+  show_low_confidence_edges: true
   show_meta: false
   show_independent: false
   exclude: []

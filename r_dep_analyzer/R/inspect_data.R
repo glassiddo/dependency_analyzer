@@ -169,6 +169,21 @@ inspect_referenced_data <- function(parsed, project_path, data_path = character(
       stringsAsFactors = FALSE
     )
   )
+  base_resolution <- character(0)
+  resolution_source <- if (!is.null(data_scan) && length(data_scan$existing_paths_norm %||% character(0)) > 0) {
+    normalize_path_canonical(data_scan$existing_paths_norm)
+  } else {
+    all_paths
+  }
+  resolution_source <- unique(resolution_source[!is.na(resolution_source) & nzchar(resolution_source)])
+  base <- tolower(basename(resolution_source))
+  has_dir <- grepl("/", resolution_source, fixed = TRUE)
+  base_to_full <- split(resolution_source[has_dir], base[has_dir])
+  for (b in names(base_to_full)) {
+    cands <- unique(base_to_full[[b]])
+    if (length(cands) == 1 && !is.na(cands[1]) && nzchar(cands[1])) base_resolution[b] <- cands[1]
+  }
+  out$basename_resolution <- base_resolution
   if (!is.null(data_scan)) out$data_scan <- data_scan
   out
 }

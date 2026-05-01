@@ -1,12 +1,47 @@
 # CLAUDE.md — Development Guide for R Dependency Analyzer
 
-This file documents the architecture, known issues, and desired output spec for this tool. Read it before making any changes.
+This file documents the architecture, known issues, and desired output spec for this tool. Read it before making changes.
+
+---
+
+## Current product direction
+
+The analyzer is a repeatable static auditor for messy R/Stata research projects, not an agentic codebase interpreter. Its core value is a trustworthy dependency graph plus structured outputs that can be handed to an AI agent or human reviewer.
+
+Prioritize:
+
+1. High-quality dependency graph.
+2. Machine-readable `dependency_graph.json`, `nodes.csv`, and `edges.csv`.
+3. Confidence/provenance for every edge.
+4. Compact `agent_context.md` handoff.
+5. Less noisy HTML and actionable issues only.
+
+Core outputs in `<project>/_dependency_analysis/`:
+
+- `dependency_graph.html`
+- `dependency_graph.json`
+- `nodes.csv`
+- `edges.csv`
+- `issues.csv`
+- `agent_context.md`
+- `path_setup.txt`
+
+Normalized graph schema:
+
+- Node `type`: `script`, `data`, `missing_script`, optionally `external_data`.
+- Node `role`: `setup`, `master`, `script`, `stata`, `archived`, `unknown`.
+- Edge `type`: `source_run`, `reads`, `writes`, `data_flow`.
+- Edge `confidence`: `high`, `medium`, `low`.
+
+Low-confidence edges must remain explicit, but should not dominate the high-confidence likely partial order. Noisy observations such as "dataset written but never read" belong in notes/agent context, not the main issue table.
+
+Archive/old/backup folders are scanned, not deleted from analysis. Archived script nodes use `role = "archived"` and default to `included = false`; they are hidden from the active graph and headline issue counts unless active code explicitly references them or `graph.show_archived` is enabled. Archived issues use `scope = "archived"` and are grouped separately in HTML, JSON, CSV, and `agent_context.md`.
 
 ---
 
 ## What this tool does
 
-Scans a research project containing R and/or Stata scripts, extracts dependencies between files (who sources whom, who reads/writes which datasets), builds a directed dependency graph, detects issues, and outputs a single interactive HTML report. It never modifies the project files — read-only analysis only.
+Scans a research project containing R and/or Stata scripts, extracts dependencies between files (who sources whom, who reads/writes which datasets), builds a directed dependency graph, detects scoped issues, and outputs local HTML plus JSON/CSV artifacts. It never modifies project files except writing `_dependency_analysis`.
 
 **Primary use case**: research projects with a setup file defining path variables (e.g. `build.dir <- "data/Build/"`), multiple build scripts referencing those paths, and a master orchestrator. The tool must correctly resolve path-variable references to identify the actual file relationships.
 
@@ -22,7 +57,7 @@ R/
   inspect_data.R          Step 3. Inspect referenced data files for metadata (read-only).
   build_graph.R           Step 4. Build dependency graph nodes/edges from parsed data.
   detect_issues.R         Step 5. Detect circular deps, missing files, wrong deps, etc.
-  generate_outputs.R      Step 6. Generate dependency_graph.html and optional master_summary.md.
+  generate_outputs.R      Step 6. Generate HTML, JSON, CSV, path_setup.txt, and agent_context.md.
   config.R                Config parsing and defaults.
   data_scan.R             Dataset scanning helpers.
   dataset_index.R         Dataset index construction.
@@ -150,13 +185,13 @@ fread(paste0(ctries_dir, "AGO.csv"))             # "data/Build/Countries/AGO.csv
 
 ## Code Conventions
 
-- All functions are plain R (no tidyverse, no packages required beyond base)
-- `igraph` and `readxl` are optional dependencies (checked with `requireNamespace`)
+- Required runtime dependencies are R, `dplyr`, and `jsonlite`.
+- `yaml`, `igraph`, and `readxl` are optional dependencies checked with `requireNamespace`.
 - The tool must run on Windows (backslash paths) and Mac/Linux; always normalize with `gsub("\\\\", "/",...)`
 - Never use `here()` or working directory assumptions inside the tool itself — all paths are passed explicitly
 - HTML is built as string concatenation (no templating library) — keep this approach
 - No user-facing changes without updating `README.md`
-- No new R package dependencies — keep the tool dependency-free by default
+- Keep dependencies light and document any new required package in `README.md`.
 
 ---
 
