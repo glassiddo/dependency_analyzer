@@ -1,7 +1,6 @@
 # R Dependency Analyzer
 
 <img width="455" height="353" alt="image" src="https://github.com/user-attachments/assets/a8cef7f8-9a1f-4818-b866-89999d64d68f" />
-(Example graph screenshots for this project are from running the analyzer on the [my thesis repo.]([https://github.com/glassiddo/masters_thesis_thailand])
 
 `r_dep_analyzer` is a static, read-only dependency auditor for messy R and Stata research projects. It scans scripts, data reads and writes, `source()` and Stata `do` relationships, path/setup files, archived folders, and unresolved references, then writes a compact set of review artifacts.
 
@@ -81,3 +80,5 @@ High-confidence edges come from direct resolved `source()`/Stata `do` calls, dir
 ## Limitations
 
 This is a static heuristic tool. It does not execute the project. Dynamic paths, complex wrappers, runtime-generated filenames, nonstandard Stata/R patterns, and custom pipeline frameworks can be missed or assigned low confidence. Execution order is a best-effort hypothesis, not proof of the runnable pipeline. Treat the output as a map for review, not as a build system. 
+
+[Example graph screenshots for this project are from running the analyzer on the my thesis repo - https://github.com/glassiddo/masters_thesis_thailand]
