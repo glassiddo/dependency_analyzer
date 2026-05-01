@@ -8,7 +8,7 @@ Agentic AI can inspect a codebase, but messy research projects often contain hun
 
 ## Setup
 
-Use R 4.1 or newer. Requires `dplyr` and `jsonlite`, `yaml`, `igraph`, and `readxl` (the latter enables Excel metadata/sample inspection which is not necessary for functionality).
+Use R 4.1 or newer. Requires `dplyr`, `jsonlite`, `yaml`, `igraph`, and `readxl` (the latter enables Excel metadata/sample inspection which is not necessary for functionality).
 
 ## Usage
 
