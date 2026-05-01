@@ -103,8 +103,6 @@ try_topological_order <- function(graph) {
   r_nodes <- names(degree)[degree > 0L]
   if (length(r_nodes) == 0) return(character(0))
   sort_edges <- r_edges
-  src_idx <- r_edges$type %in% c("source_run", "sources")
-  sort_edges[src_idx, c("from", "to")] <- r_edges[src_idx, c("to", "from")]
   # Defensive: drop edges that reference non-script nodes (e.g. missing sourced files).
   # This keeps igraph happy and matches the fallback behavior which only orders known scripts.
   sort_edges <- sort_edges[sort_edges$from %in% r_nodes & sort_edges$to %in% r_nodes, , drop = FALSE]
@@ -357,85 +355,12 @@ write_agent_context_v2 <- function(graph, issues, notes, parsed, project_path, o
   invisible(out_path)
 }
 
-write_agent_context <- function(graph, issues, notes, parsed, project_path, out_dir, project_name = NULL, roots = character(0)) {
-  out_path <- file.path(out_dir, "agent_context.md")
-  con <- file(out_path, open = "w", encoding = "UTF-8")
-  on.exit(close(con), add = TRUE)
-  wl <- function(x = "") writeLines(x, con)
-  if (is.null(project_name) || !nzchar(project_name)) project_name <- basename(project_path)
-  nodes <- graph$nodes; edges <- graph$edges
-  wl(paste0("# Agent Handoff: ", project_name)); wl("")
-  wl("## Project summary")
-  wl(paste0("- Scripts: ", sum(nodes$type == "script")))
-  wl(paste0("- Dataset references: ", sum(nodes$type == "data")))
-  wl(paste0("- Edges: ", nrow(edges), " (low confidence: ", sum(edges$confidence == "low", na.rm = TRUE), ")"))
-  wl(paste0("- Actionable issues: ", nrow(issues))); wl("")
-
-  wl("## Detected setup/master files")
-  cand <- graph$setup_master_candidates %||% data.frame()
-  if (nrow(cand) > 0) for (i in seq_len(nrow(cand))) wl(paste0("- `", cand$path[i], "`: ", cand$role[i], ", ", cand$confidence[i], " confidence — ", cand$reason[i])) else wl("- None detected")
-  wl("")
-
-  wl("## Path variables")
-  vars <- parsed$setup_vars %||% character(0)
-  if (length(vars) > 0) {
-    nms <- unique(names(vars)[nzchar(names(vars))])
-    shown <- head(nms, 50)
-    for (nm in shown) {
-      vals <- vars[names(vars) == nm]
-      val <- vals[length(vals)]
-      if (nzchar(val)) wl(paste0("- `", nm, "` = `", val, "`"))
-    }
-    if (length(nms) > length(shown)) wl(paste0("- ... ", length(nms) - length(shown), " additional path variables omitted"))
-  } else wl("- None detected")
-  wl("")
-
-  wl("## Candidate entry points and active pipeline")
-  ord <- try_topological_order(graph)
-  if (length(roots) > 0) wl(paste0("- Candidate entry points: ", paste(paste0("`", roots, "`"), collapse = ", ")))
-  if (length(ord) > 0) {
-    shown <- head(ord, 30)
-    for (i in seq_along(shown)) wl(paste0(i, ". `", shown[i], "`"))
-    if (length(ord) > length(shown)) wl(paste0("- ... ", length(ord) - length(shown), " additional scripts omitted"))
-  } else wl("- No reliable high-confidence partial order could be computed")
-  wl("")
-
-  wl("## High-confidence dependency edges")
-  hi <- edges[edges$confidence == "high" & edges$type %in% c("source_run", "data_flow"), , drop = FALSE]
-  if (nrow(hi) > 0) {
-    for (i in seq_len(min(nrow(hi), 40L))) wl(paste0("- `", hi$from[i], "` -> `", hi$to[i], "` (", hi$type[i], "): ", hi$provenance[i]))
-    if (nrow(hi) > 40L) wl(paste0("- ... ", nrow(hi) - 40L, " additional high-confidence edges omitted"))
-  } else wl("- None")
-  wl("")
-
-  wl("## Low-confidence / uncertain areas")
-  low <- edges[edges$confidence == "low", , drop = FALSE]
-  if (nrow(low) > 0) for (i in seq_len(min(nrow(low), 30L))) wl(paste0("- `", low$from[i], "` -> `", low$to[i], "`: ", low$certainty_notes[i] %||% low$provenance[i])) else wl("- None")
-  wl("")
-
-  wl("## Actionable issues")
-  if (nrow(issues) > 0) for (i in seq_len(nrow(issues))) wl(paste0("- [", issues$severity[i], "] ", issues$type[i], ": ", issues$message[i])) else wl("- None")
-  wl("")
-
-  wl("## Informational notes")
-  if (!is.null(notes) && nrow(notes) > 0) for (i in seq_len(min(nrow(notes), 20L))) wl(paste0("- ", notes$type[i], ": ", notes$message[i])) else wl("- None")
-  wl("")
-
-  wl("## Suggested next checks")
-  wl("- Confirm the true master/setup entry point before executing scripts.")
-  wl("- Inspect low-confidence basename-only or unresolved-variable data-flow edges.")
-  wl("- Decide whether archived/old folders should remain excluded from the active graph.")
-  wl("- Use `dependency_graph.json`, `nodes.csv`, and `edges.csv` as the source of truth for downstream review.")
-  invisible(out_path)
-}
-
 # ---- Execution order ----
 build_execution_order_display <- function(graph, parsed, uu) {
   ord <- uu$ord; used <- uu$used; unused <- uu$unused
   if (length(ord) == 0) return('<p>Could not determine order (possible cycles).</p>')
   r_edges <- graph$edges[graph$edges$type %in% c("source_run", "sources", "data_flow") & graph$edges$confidence != "low", ]
   sort_edges <- r_edges
-  sort_edges[r_edges$type %in% c("source_run", "sources"), c("from", "to")] <- r_edges[r_edges$type %in% c("source_run", "sources"), c("to", "from")]
   preds_of <- split(sort_edges$from, sort_edges$to)
   used_ord <- ord[ord %in% used]
   levels <- setNames(rep(NA_integer_, length(used)), used)
@@ -1528,7 +1453,7 @@ build_dataset_index <- function(data_info, parsed) {
     sprintf('<span class="refs" title="%s">%s</span>', html_esc(paste(parts, collapse = ", ")), html_esc(disp))
   }
 
-  out <- '<h2 id="datasets">Dataset Index</h2><p class="viz-desc">Datasets found in the provided data folder (existence scan only), grouped by directory. Hover filename for full path.</p>'
+  out <- '<h2 id="datasets">Dataset Index</h2><p class="viz-desc">Datasets found in the provided data folder. The analyzer may inspect metadata and small samples for supported formats; Stata .dta files are detected but not read. Hover filename for full path.</p>'
 
   render_dir <- function(d, depth = 0L) {
     kids <- sort_children(kids_map[[d]] %||% character(0))
@@ -1620,7 +1545,7 @@ build_agent_handoff_html <- function(graph, issues, roots = character(0)) {
   root_html <- if (length(roots) > 0) paste(paste0("<code>", html_esc(roots), "</code>"), collapse = ", ") else "<span class='dim'>none detected</span>"
   cand_html <- if (nrow(cand) > 0) {
     paste(vapply(seq_len(min(nrow(cand), 8L)), function(i) {
-      sprintf("<li><code>%s</code> — %s, %s confidence</li>", html_esc(cand$path[i]), html_esc(cand$role[i]), html_esc(cand$confidence[i]))
+      sprintf("<li><code>%s</code> - %s, %s confidence</li>", html_esc(cand$path[i]), html_esc(cand$role[i]), html_esc(cand$confidence[i]))
     }, character(1)), collapse = "")
   } else "<li class='dim'>No setup/master candidates detected</li>"
   issue_html <- if (nrow(issues) > 0) {
@@ -1752,12 +1677,12 @@ build_full_html <- function(parsed, data_info, graph, issues, uu, exec_display, 
   handoff_html <- build_agent_handoff_html(graph, issues, roots)
   detected_html <- build_detected_section(graph, parsed)
 
-  # Data existence note (the tool never opens/reads data files)
+  # Data inspection note: supported formats may be opened for metadata/sample rows.
   data_path_note <- ""
   if (isTRUE(show_dataset_index)) {
     n_scanned <- length(data_info$data_scan$existing_paths_norm)
     if (n_scanned > 0) {
-      data_path_note <- sprintf('<span class="stat-note">%d data files listed (existence only)</span>', n_scanned)
+      data_path_note <- sprintf('<span class="stat-note">%d data files listed; supported formats may include metadata/sample inspection</span>', n_scanned)
     } else {
       data_path_note <- '<span class="stat-note dim">No data files found in the provided data folder</span>'
     }
@@ -1925,8 +1850,8 @@ details summary::-webkit-details-marker{color:#94a3b8}
     %s
   </div>
   <div class="card" id="execution">
-    <h2>Likely Partial Order</h2>
-    <p class="viz-desc">High-confidence order only. Order is incomplete when dependencies are unresolved or low confidence.</p>
+    <h2>Likely Execution-Facing Order</h2>
+    <p class="viz-desc">Best-effort static order from high/medium-confidence source/run and inferred data-flow edges. Entry/master files are shown before files they orchestrate. Order is incomplete when dependencies are unresolved or low confidence.</p>
     %s
   </div>
   <div class="card" id="details">

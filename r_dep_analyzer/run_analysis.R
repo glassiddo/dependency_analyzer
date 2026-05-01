@@ -17,6 +17,8 @@
 # -----------------------------------------------------------------------------
 default_data_path <- ""
 
+`%||%` <- function(x, y) if (length(x) == 0 || is.null(x)) y else x
+
 args <- commandArgs(trailingOnly = TRUE)
 
 print_usage <- function() {
@@ -26,6 +28,7 @@ print_usage <- function() {
   message("  Rscript run_analysis.R <project_path> --roots <file1,file2,...>")
   message("Options:")
   message("  --config <path>            Path to config.yaml (optional)")
+  message("  --data-path <path>         Optional external data root to scan/read for metadata")
   message("  --roots <csv>              Comma-separated root files (relative to project)")
   message("  --root <path>              Root file (repeatable)")
   message("  --from <csv>               Alias for --roots")
@@ -41,6 +44,7 @@ parse_cli_args <- function(args) {
   out <- list(
     config_path = trimws(Sys.getenv("R_DEP_CONFIG_PATH", "")),
     project_path = NULL,
+    data_path = trimws(Sys.getenv("R_DEP_DATA_PATH", "")),
     exclude_folders = NULL,
     roots = character(0),
     show_meta = NA,
@@ -55,6 +59,7 @@ parse_cli_args <- function(args) {
     a <- args[[i]]
     if (a %in% c("--help", "-h")) { out$help <- TRUE; i <- i + 1L; next }
     if (a == "--config" && i + 1L <= length(args)) { out$config_path <- args[[i + 1L]]; i <- i + 2L; next }
+    if (a == "--data-path" && i + 1L <= length(args)) { out$data_path <- args[[i + 1L]]; i <- i + 2L; next }
     if (a %in% c("--roots", "--from") && i + 1L <= length(args)) {
       out$roots <- c(out$roots, trimws(strsplit(args[[i + 1L]], "[,;]+")[[1]]))
       i <- i + 2L; next
@@ -103,6 +108,19 @@ if (isTRUE(cli$help)) {
   quit(save = "no", status = 0)
 }
 
+check_required_packages <- function(pkgs) {
+  missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing) == 0) return(invisible(TRUE))
+  stop(
+    "Missing required R package(s): ", paste(missing, collapse = ", "), "\n",
+    "Install them with:\n",
+    "  install.packages(c(\"dplyr\", \"jsonlite\"))\n",
+    call. = FALSE
+  )
+}
+
+check_required_packages(c("dplyr", "jsonlite"))
+
 interactive_mode <- is.null(cli$project_path) || !nzchar(trimws(cli$project_path))
 if (interactive_mode) {
   project_path <- trimws(Sys.getenv("R_DEP_PROJECT_PATH", ""))
@@ -146,7 +164,7 @@ if (interactive() && interactive_mode && length(exclude_folders) == 0) {
   data_path <- trimws(Sys.getenv("R_DEP_DATA_PATH", ""))
 } else {
   project_name <- trimws(Sys.getenv("R_DEP_PROJECT_NAME", ""))
-  data_path <- trimws(Sys.getenv("R_DEP_DATA_PATH", ""))
+  data_path <- trimws(cli$data_path %||% "")
 }
 if (!nzchar(project_name)) project_name <- basename(project_path)
 if (length(data_path) == 0 || !nzchar(data_path)) {

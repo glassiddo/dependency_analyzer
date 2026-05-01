@@ -9,6 +9,8 @@ thesis/
 
 # Temp/scratch files
 r_dep_analyzer/check_issues.R
+r_dep_analyzer/CLAUDE.md
+**/CLAUDE.md
 
 # Generated dependency analysis outputs
 **/_dependency_analysis/
